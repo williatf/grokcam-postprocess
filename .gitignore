@@ -1,0 +1,49 @@
+# Disposable pipeline workspace
+/work/
+
+# Generated image sequences and rendered video
+*.[dD][nN][gG]
+*.tif
+*.tiff
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.mov
+*.mkv
+*.webm
+segments.txt
+
+# Python caches, test caches, and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Darktable databases and disposable configuration
+data.db
+library.db
+darktable.db
+*.db-shm
+*.db-wal
+dt_config/
+
+# Logs, locks, staging, and reproducible temporary files
+*.log
+*dryrun*.txt
+*.out
+*.pid
+*.lock
+.staging/
+*.tmp
+*.tmp.*
+*.part
