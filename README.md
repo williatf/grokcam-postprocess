@@ -13,8 +13,9 @@ directory.
 
 ```text
 DNG -> matched RAW development -> 16-bit RGB TIFF
-    -> sprocket-pair detection -> batch validation/interpolation
-    -> sprocket-relative subpixel crop -> rotate/mirror/contrast
+    -> sprocket-pair detection -> primary validation/interpolation
+    -> optional residual sprocket measurement/recovery
+    -> one corrected full-resolution subpixel crop -> rotate/mirror/contrast
     -> restrained exposure and color normalization
     -> verified segment -> verified joined movie + JSON manifest
 ```
@@ -50,7 +51,16 @@ First inspect a plan without processing:
 ```
 
 Useful options are `--first`, `--last`, `--batch-frames`, `--jobs`, `--fps`,
-`--minimum-free-gib`, `--calibration`, and `--match-report`.
+`--minimum-free-gib`, `--calibration`, `--match-report`, and
+`--vertical-stabilization`. The second-stage physical registration is disabled
+by default so existing commands preserve their established crop behavior.
+
+Enable it for a new output directory with:
+
+```bash
+/home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
+  RAW_DIR OUTPUT_DIR --vertical-stabilization
+```
 
 ## Calibration
 
@@ -74,8 +84,9 @@ only after frame-count probing and a full decode; reproducible TIFF/JPEG caches
 and component segments are then removed.
 
 The manifest records source identity, detection score, measured/interpolated
-status, anchor and crop coordinates, normalization measurements/corrections,
-timings, checksums, and video verification. A missing match report, noncontiguous
+status, anchor and crop coordinates, residual stabilization measurements and
+sources when enabled, normalization measurements/corrections, timings,
+checksums, and video verification. A missing match report, noncontiguous
 input, insufficient free space, absence of any usable sprocket measurements, or
 failed video verification stops the run explicitly.
 

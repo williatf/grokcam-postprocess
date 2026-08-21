@@ -35,7 +35,10 @@ sprocket-pair detection
 batch validation and interpolation
     |
     v
-sprocket-relative subpixel crop
+optional residual sprocket measurement and recovery
+    |
+    v
+one corrected full-resolution subpixel crop
     |
     v
 orientation and contrast
@@ -68,7 +71,7 @@ layers:
 | Entry and composition | `grokcam.cli.process_reel`, `grokcam.pipeline` | Parse the supported CLI, load calibration, and invoke the production pipeline. |
 | Batch lifecycle | `grokcam.batch`, `grokcam.resume`, `grokcam.timing` | Select frames, lock an output, plan/resume batches, stage work, order the stages, report timing, clean work, and finalize. |
 | RAW development | `grokcam.raw_development` | Validate and apply the frozen rawpy-to-Darktable match and write 16-bit TIFFs. |
-| Film geometry | `grokcam.sprocket_detection`, `grokcam.registration`, `grokcam.image_processing` | Detect and validate sprocket anchors, calculate crop coordinates, resample, orient, and apply contrast. |
+| Film geometry | `grokcam.sprocket_detection`, `grokcam.registration`, `grokcam.vertical_stabilization`, `grokcam.image_processing` | Detect and validate primary anchors, optionally refine vertical alignment from retained sprocket boundaries, calculate crop coordinates, resample once for final output, orient, and apply contrast. |
 | Presentation normalization | `grokcam.normalization` | Apply bounded, temporally smoothed exposure and channel corrections. |
 | Video and records | `grokcam.encoding`, `grokcam.manifest`, `grokcam.regression` | Encode and verify video, write atomic manifests, calculate hashes, and compare results with a reference. |
 | Configuration and data | `grokcam.config`, `grokcam.models` | Own calibrated constants and structured geometry/detection values. |
@@ -88,7 +91,10 @@ RunOptions + ProductionCalibration
       detect each TIFF -> validate batch
               |
               v
-      crop/register each frame -> JPEG
+ optional residual measurement -> resolve corrections
+              |
+              v
+ final full-resolution crop/register -> JPEG
               |
               v
       normalize sequence -> JPEG
@@ -159,10 +165,11 @@ operational choice that reduces peak disposable storage and restart cost.
 | `--dry-run` | off | Exact alias for `--plan-only`. |
 | `--calibration FILE` | none | Advanced JSON overrides for production calibration. Not needed for normal v1 processing. |
 | `--match-report FILE` | repository v1 artifact | Explicitly override the learned match report. Avoid for normal v1 production. |
+| `--vertical-stabilization` | off | Enable second-stage physical vertical registration. Use a new output directory. |
 | `-h`, `--help` | — | Print the authoritative CLI usage and exit. |
 
-The current configuration loader accepts detector, crop, match-report, and
-contrast overrides. It also parses normalization-related keys, but the v1
+The current configuration loader accepts detector, crop, match-report,
+vertical-stabilization, and contrast overrides. It also parses normalization-related keys, but the v1
 normalizer uses its frozen code constants directly; do not expect those JSON
 keys to change normalization behavior.
 
@@ -403,8 +410,9 @@ interpolation between accepted measurements. At a batch edge, interpolation
 holds the nearest accepted value. If the batch has no usable measurements for an
 axis, processing stops with `No usable sprocket measurements in batch`.
 
-The current production path has one detector plus validation/interpolation. It
-does not contain a second fallback detector or phase model.
+This is the primary detector. When second-stage vertical stabilization is
+enabled, its result still determines the initial frame location; residual
+registration refines only the final vertical crop coordinate.
 
 ## 8. Registration and cropping
 
@@ -420,7 +428,29 @@ width     = 1133
 height    = 900
 ```
 
-The coordinates can be fractional. Pillow's `EXTENT` transform resamples the
+The coordinates can be fractional. With residual stabilization disabled, this
+is the unchanged final crop. With it enabled, production measures the retained
+upper and lower sprocket boundaries in an in-memory provisional registration,
+then computes:
+
+```text
+corrected_crop_top = crop_top + residual_correction_y
+```
+
+The normal upper-sprocket ROI is tried first. If the primary measurement was
+rejected and that ROI has no valid terminal edge, an expanded upper ROI handles
+large transport excursions. A separately validated lower sprocket is the
+same-frame rescue when the upper edge is dirty or unavailable. Only when both
+measurements fail is the correction interpolated between neighboring valid
+corrections (or held from the nearest valid correction at a batch boundary).
+The correction is never silently set to zero.
+
+Large corrections are allowed: their physical edge strength, contrast, terminal
+boundary quality, crop bounds, and upper/lower agreement are evaluated rather
+than their magnitude. A valid upper measurement remains authoritative when the
+two boundaries disagree; they are never blindly averaged.
+
+Pillow's `EXTENT` transform resamples the
 1133×900 crop with bicubic interpolation, correcting horizontal weave and
 vertical transport drift without integer-pixel stepping.
 
@@ -433,9 +463,11 @@ After cropping, the processor:
 
 The registered and normalized still frames are 1133×900. FFmpeg pads odd video
 dimensions to even values, so the encoded video is normally 1134×900. There is
-no current phase handling, temporal crop smoothing, or generic content-based
-stabilization. Each crop follows the physical sprocket anchor; only rejected
-anchor measurements are interpolated.
+no temporal smoothing or generic content-based stabilization. The optional
+stage is a second physical registration correction, not "jitter smoothing."
+The retained output always comes directly from the full-resolution developed
+TIFF with one final bicubic crop; cropped pixels are never shifted and exposed
+areas are never filled with synthetic black.
 
 ## 9. Temporal normalization
 
@@ -587,6 +619,7 @@ and final verification record—not a replacement for the source DNGs.
 | `fps`, `batch_frames` | Requested movie rate and batch setting. |
 | `raw_development_calibration` | Calibration path, SHA-256, model, creation date, and training/holdout frames. |
 | `crop_preset`, `crop` | `loose` and the four crop values. |
+| `vertical_stabilization` | Enabled state, upper/lower reference positions, confidence threshold, and agreement tolerance. |
 | `normalization` | Picture aperture, bounds/blend metadata, and eventually `target_median_luma`. |
 | `tools` | Python, Pillow, rawpy, and FFmpeg versions recorded at creation. |
 | `segments` | Per-segment state, verification, timing, and frame records. |
@@ -618,8 +651,20 @@ frame, source_name, source_bytes
 anchor_x, anchor_y
 detected, accepted, detector_score
 crop_left, crop_top
+vertical_stabilization_enabled
+residual_sprocket_y, residual_confidence, residual_search_mode
+residual_source, residual_correction_y, corrected_crop_top
+bottom_sprocket_y, bottom_confidence, top_bottom_correction_disagreement_y
+post_correction_residual_y, post_correction_confidence
 normalization
 ```
+
+`crop_top` preserves the primary crop coordinate. `corrected_crop_top` is the
+actual sampled vertical coordinate when stabilization is enabled.
+`residual_source` is `measured`, `expanded_residual`, `bottom_rescue`,
+`interpolated`, or `fallback`. Rejection reasons and detailed normal/expanded
+edge measurements are retained for auditing. When disabled, the enabled flag is
+false and the residual-only fields are absent, preserving the former frame path.
 
 The `normalization` object contains `median_luma`, `channel_median`,
 `exposure_gain`, and `channel_gains_rgb`.

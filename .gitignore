@@ -1,5 +1,6 @@
 # Disposable pipeline workspace
 /work/
+/research/output/
 .DS_Store
 ._.DS_Store
 

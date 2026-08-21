@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import fcntl
+import io
 import os
 import shutil
 import time
@@ -25,6 +26,8 @@ from .registration import crop_for_detection
 from .resume import completed_frame_numbers, contiguous_batches
 from .sprocket_detection import detect, validate_batch
 from .timing import timed
+from .vertical_stabilization import (measure_frame, measurement_details,
+                                     resolve_batch, verify_post_crop)
 
 
 @dataclass(frozen=True)
@@ -184,18 +187,54 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
 
         with timed("crop_register", timings):
             frame_records = []
-            for dng, detection in zip(batch, detections):
-                crop = crop_for_detection(detection, calibration.crop)
+            primary_crops = [crop_for_detection(item, calibration.crop) for item in detections]
+            stabilization = None
+            if calibration.vertical_stabilization.enabled:
+                measured = []
+                developed_heights = []
+                for dng, detection, crop in zip(batch, detections, primary_crops):
+                    with Image.open(tiffs / f"{dng.stem}.tif") as image:
+                        developed_heights.append(image.height)
+                        provisional = registered_frame(image, crop, calibration.contrast)
+                    # Match the validated detector input without retaining a
+                    # second crop or reading/developing the DNG again.
+                    serialized = io.BytesIO()
+                    provisional.save(serialized, format="JPEG", quality=95, subsampling=0)
+                    serialized.seek(0)
+                    with Image.open(serialized) as detector_image:
+                        measured.append(measure_frame(
+                            detector_image, detection, calibration.vertical_stabilization
+                        ))
+                stabilization = resolve_batch(
+                    measured, primary_crops, developed_heights,
+                    calibration.vertical_stabilization,
+                )
+
+            for index, (dng, detection, primary_crop) in enumerate(
+                    zip(batch, detections, primary_crops)):
+                result = None if stabilization is None else stabilization[index]
+                crop = primary_crop if result is None else result.corrected_crop
                 with Image.open(tiffs / f"{dng.stem}.tif") as image:
                     movie = registered_frame(image, crop, calibration.contrast)
                 destination = registered / f"{dng.stem}.jpg"
                 movie.save(destination, quality=95, subsampling=0)
-                frame_records.append({
+                record = {
                     "frame": frame_number(dng), "source_name": dng.name,
                     "source_bytes": dng.stat().st_size, "anchor_x": detection.cx,
                     "anchor_y": detection.cy, "detected": detection.detected,
                     "accepted": detection.accepted, "detector_score": detection.score,
-                    "crop_left": crop.left, "crop_top": crop.top})
+                    "crop_left": crop.left, "crop_top": primary_crop.top,
+                    "vertical_stabilization_enabled": result is not None,
+                }
+                if result is not None:
+                    record.update(result.diagnostics)
+                    record["normal_residual_measurement"] = measurement_details(measured[index].normal)
+                    record["expanded_residual_measurement"] = measurement_details(measured[index].expanded)
+                    with Image.open(destination) as serialized_movie:
+                        record.update(verify_post_crop(
+                            serialized_movie, calibration.vertical_stabilization
+                        ))
+                frame_records.append(record)
         shutil.rmtree(tiffs)
 
         registered_paths = sorted(registered.glob("frame_*.jpg"), key=frame_number)

@@ -10,7 +10,8 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from grokcam.config import DEFAULT_MATCH_REPORT, DetectorCalibration, load_calibration
+from grokcam.config import (DEFAULT_MATCH_REPORT, DetectorCalibration,
+                            VerticalStabilizationCalibration, load_calibration)
 from grokcam.batch import RunOptions, finalize_if_complete, remaining_batches
 from grokcam.manifest import load_or_create
 from grokcam.models import SprocketDetection
@@ -20,6 +21,8 @@ from grokcam.regression import compare_manifests
 from grokcam.regression import frame_records
 from grokcam.resume import contiguous_batches
 from grokcam.sprocket_detection import detect, validate_batch
+from grokcam.vertical_stabilization import (FrameMeasurements, ResidualMeasurement,
+                                            measure_frame, resolve_batch)
 
 
 class ProductionTests(unittest.TestCase):
@@ -35,6 +38,15 @@ class ProductionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unknown calibration"):
                 load_calibration(path)
 
+    def test_vertical_stabilization_is_disabled_by_default(self):
+        self.assertFalse(load_calibration().vertical_stabilization.enabled)
+
+    def test_vertical_calibration_override_is_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "calibration.json"
+            path.write_text('{"vertical_stabilization": {"enabled": true}}', encoding="utf-8")
+            self.assertTrue(load_calibration(path).vertical_stabilization.enabled)
+
     def test_detector_on_synthetic_pair(self):
         image = np.zeros((1520, 2028, 3), dtype=np.uint8)
         image[100:300, 140:505] = 255
@@ -43,6 +55,82 @@ class ProductionTests(unittest.TestCase):
         self.assertEqual(result.cx, 322.0)
         self.assertEqual(result.cy, 592.5)
         self.assertEqual(result.score, 0.0)
+
+    def test_adaptive_top_search_only_follows_rejected_primary_failure(self):
+        image = np.zeros((900, 1133, 3), dtype=np.uint8)
+        image[60:142, 0:90] = 255
+        image[674:900, 0:90] = 255
+        rejected = SprocketDetection(300, 700, 1, accepted=False)
+        measured = measure_frame(Image.fromarray(image), rejected,
+                                 VerticalStabilizationCalibration(enabled=True))
+        self.assertEqual(measured.search_mode, "expanded")
+        self.assertAlmostEqual(measured.selected_top.y, 141.5, delta=2.0)
+
+    def test_large_residual_correction_adjusts_crop_without_cap(self):
+        config = VerticalStabilizationCalibration(enabled=True)
+        top = ResidualMeasurement(128.1190476191, 1.0, .1, .2, 0.0)
+        bottom = ResidualMeasurement(666.0, 1.0, .1, .2, .5)
+        measured = FrameMeasurements(top, None, top, "normal", bottom)
+        crop = crop_for_detection(SprocketDetection(300, 800, 1), load_calibration().crop)
+        result = resolve_batch([measured], [crop], [1520], config)[0]
+        self.assertEqual(result.source, "measured")
+        self.assertAlmostEqual(result.correction_y, 96.8095238095)
+        self.assertAlmostEqual(result.corrected_crop.top, crop.top + 96.8095238095)
+
+    def test_invalid_top_uses_bottom_rescue_not_dirty_large_edge(self):
+        config = VerticalStabilizationCalibration(enabled=True)
+        dirty = ResidualMeasurement(196.0, 1.0, .1, .2, .8)
+        bottom = ResidualMeasurement(756.0, 1.0, .1, .2, .5)
+        measured = FrameMeasurements(dirty, None, dirty, "normal", bottom)
+        crop = crop_for_detection(SprocketDetection(300, 800, 1), load_calibration().crop)
+        result = resolve_batch([measured], [crop], [1520], config)[0]
+        self.assertEqual(result.source, "bottom_rescue")
+        self.assertEqual(result.correction_y, 1.0)
+
+    def test_failed_same_frame_measurements_interpolate_correction(self):
+        config = VerticalStabilizationCalibration(enabled=True)
+        valid_a = ResidualMeasurement(config.top_reference_y - 10, 1.0, .1, .2, 0.0)
+        invalid = ResidualMeasurement(None, 0.0)
+        valid_b = ResidualMeasurement(config.top_reference_y - 20, 1.0, .1, .2, 0.0)
+        bad_bottom = ResidualMeasurement(None, 0.0)
+        values = [FrameMeasurements(item, None, item, "normal", bad_bottom)
+                  for item in (valid_a, invalid, valid_b)]
+        crop = crop_for_detection(SprocketDetection(300, 700, 1), load_calibration().crop)
+        results = resolve_batch(values, [crop] * 3, [1520] * 3, config)
+        self.assertEqual(results[1].source, "interpolated")
+        self.assertAlmostEqual(results[1].correction_y, 15.0)
+
+    def test_bounded_corrected_crop_has_no_synthetic_black_fill(self):
+        image = Image.new("RGB", (2028, 1520), "white")
+        crop = crop_for_detection(SprocketDetection(300, 800, 1), load_calibration().crop)
+        from grokcam.image_processing import registered_frame
+        output = registered_frame(image, crop, load_calibration().contrast)
+        self.assertEqual(np.asarray(output).min(), 255)
+
+    def test_blue_reel_named_vertical_regressions(self):
+        """Freeze production decisions measured on Blue Reel 3000--3999."""
+        config = VerticalStabilizationCalibration(enabled=True)
+        # frame: (top y, top tail, bottom y, mode, expected source, correction)
+        cases = {
+            3260: (211.0454545455, .2934, 756.5, "normal", "measured", 13.8831),
+            3451: (178.0, .0047, 714.5, "normal", "measured", 46.9286),
+            3487: (128.1190476190, .0047, 665.8333, "expanded", "expanded_residual", 96.8095),
+            3615: (195.9666666667, .3578, 755.3888888889, "normal", "bottom_rescue", 1.6111),
+            3676: (205.9285714286, .3047, 758.0, "normal", "bottom_rescue", -1.0),
+            3754: (157.7222222222, .0060, 687.0, "normal", "measured", 67.2063),
+            3846: (167.8333333333, .0023, 699.7, "normal", "measured", 57.0952),
+            3882: (142.5, .0058, 673.5, "expanded", "expanded_residual", 82.4286),
+        }
+        crop = crop_for_detection(SprocketDetection(300, 700, 1), load_calibration().crop)
+        for frame, (top_y, tail, bottom_y, mode, source, correction) in cases.items():
+            with self.subTest(frame=frame):
+                top = ResidualMeasurement(top_y, 1.0, .05, .20, tail)
+                bottom = ResidualMeasurement(bottom_y, 1.0, .03, .10, .20)
+                measured = FrameMeasurements(top, top if mode == "expanded" else None,
+                                             top, mode, bottom)
+                result = resolve_batch([measured], [crop], [1520], config)[0]
+                self.assertEqual(result.source, source)
+                self.assertAlmostEqual(result.correction_y, correction, places=3)
 
     def test_batch_validation_interpolates_failed_detection(self):
         values = [SprocketDetection(300, 700, 1), None, SprocketDetection(302, 704, 2)]

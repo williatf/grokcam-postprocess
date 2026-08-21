@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 from grokcam.batch import RunOptions
@@ -30,12 +31,19 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--dry-run", action="store_true", help="alias for --plan-only")
     result.add_argument("--calibration", type=Path, help="optional JSON calibration overrides")
     result.add_argument("--match-report", type=Path, help="override the learned color-match report")
+    result.add_argument("--vertical-stabilization", action="store_true",
+                        help="enable second-stage physical vertical registration")
     return result
 
 
 def main() -> None:
     args = parser().parse_args()
     calibration = load_calibration(args.calibration, args.match_report)
+    if args.vertical_stabilization:
+        calibration = replace(
+            calibration,
+            vertical_stabilization=replace(calibration.vertical_stabilization, enabled=True),
+        )
     options = RunOptions(
         raw_dir=args.raw_dir, output_dir=args.output_dir, first=args.first, last=args.last,
         batch_frames=args.batch_frames, fps=args.fps, jobs=args.jobs,

@@ -31,6 +31,11 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
                    calibration: ProductionCalibration, ffmpeg: Path) -> dict:
     if path.exists():
         manifest = json.loads(path.read_text(encoding="utf-8"))
+        recorded_vertical = manifest.get("vertical_stabilization", {}).get("enabled", False)
+        if recorded_vertical != calibration.vertical_stabilization.enabled:
+            raise RuntimeError(
+                "Cannot resume an output directory with a different vertical-stabilization mode"
+            )
         manifest.setdefault("batch_history", []).append({"started": utc_now(), "batch_frames": batch_frames})
         return manifest
     match_path = calibration.match.report.expanduser().resolve()
@@ -51,6 +56,14 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
         "crop_preset": "loose", "crop": {
             "x_offset": calibration.crop.x_offset, "y_offset": calibration.crop.y_offset,
             "width": calibration.crop.width, "height": calibration.crop.height},
+        "vertical_stabilization": {
+            "enabled": calibration.vertical_stabilization.enabled,
+            "top_reference_y": calibration.vertical_stabilization.top_reference_y,
+            "bottom_reference_y": calibration.vertical_stabilization.bottom_reference_y,
+            "minimum_confidence": calibration.vertical_stabilization.minimum_confidence,
+            "top_bottom_agreement_tolerance":
+                calibration.vertical_stabilization.top_bottom_agreement_tolerance,
+        },
         "normalization": {"picture_aperture": {"x": [.15, .92], "y": [.12, .88]},
                           "exposure_limit_stops": .65, "white_balance_blend": .25},
         "tools": {"python": platform.python_version(), "pillow": Image.__version__,

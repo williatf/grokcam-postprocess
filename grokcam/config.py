@@ -41,10 +41,24 @@ class MatchCalibration:
 
 
 @dataclass(frozen=True)
+class VerticalStabilizationCalibration:
+    """Second-stage physical registration, disabled for backward compatibility."""
+
+    enabled: bool = False
+    top_reference_y: float = 224.9285714286
+    bottom_reference_y: float = 757.0
+    minimum_confidence: float = 0.20
+    top_bottom_agreement_tolerance: float = 5.0
+
+
+@dataclass(frozen=True)
 class ProductionCalibration:
     detector: DetectorCalibration = field(default_factory=DetectorCalibration)
     crop: CropCalibration = field(default_factory=CropCalibration)
     match: MatchCalibration = field(default_factory=MatchCalibration)
+    vertical_stabilization: VerticalStabilizationCalibration = field(
+        default_factory=VerticalStabilizationCalibration
+    )
     contrast: float = 1.04
     picture_aperture_x: tuple[float, float] = (0.15, 0.92)
     picture_aperture_y: tuple[float, float] = (0.12, 0.88)
@@ -62,7 +76,7 @@ def load_calibration(path: Path | None = None, match_report: Path | None = None)
     calibration = ProductionCalibration()
     if path is not None:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        allowed = {"detector", "crop", "match", "contrast", "picture_aperture_x",
+        allowed = {"detector", "crop", "match", "vertical_stabilization", "contrast", "picture_aperture_x",
                    "picture_aperture_y", "exposure_limit_stops", "white_balance_blend"}
         unknown = set(raw) - allowed
         if unknown:
@@ -71,8 +85,12 @@ def load_calibration(path: Path | None = None, match_report: Path | None = None)
         crop = replace(calibration.crop, **raw.get("crop", {}))
         match_values = raw.get("match", {})
         match = replace(calibration.match, **({"report": Path(match_values["report"])} if "report" in match_values else {}))
-        scalar = {k: v for k, v in raw.items() if k not in {"detector", "crop", "match"}}
-        calibration = replace(calibration, detector=detector, crop=crop, match=match, **scalar)
+        vertical = replace(calibration.vertical_stabilization,
+                           **raw.get("vertical_stabilization", {}))
+        scalar = {k: v for k, v in raw.items()
+                  if k not in {"detector", "crop", "match", "vertical_stabilization"}}
+        calibration = replace(calibration, detector=detector, crop=crop, match=match,
+                              vertical_stabilization=vertical, **scalar)
     if match_report is not None:
         calibration = replace(calibration, match=MatchCalibration(match_report))
     return calibration
