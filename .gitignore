@@ -1,5 +1,7 @@
 # Disposable pipeline workspace
 /work/
+.DS_Store
+._.DS_Store
 
 # Generated image sequences and rendered video
 *.[dD][nN][gG]
@@ -47,3 +49,5 @@ dt_config/
 *.tmp
 *.tmp.*
 *.part
+processing_manifest.json
+*.jsonl

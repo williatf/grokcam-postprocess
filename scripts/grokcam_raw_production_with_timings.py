@@ -355,7 +355,7 @@ def main() -> None:
         )
     else:
         manifest = {
-            "pipeline": "grokcam_raw_production", "version": VERSION,
+            "pipeline": "grokcam_raw_production_darktable_matched", "version": "2.0.0",
             "created": utc_now(), "raw_dir": str(args.raw_dir), "source_policy": "read_only",
             "frame_range": [numbers[0], numbers[-1]], "frame_count": len(numbers),
             "fps": args.fps, "batch_frames": args.batch_frames,
@@ -363,7 +363,7 @@ def main() -> None:
             "normalization": {"picture_aperture": {"x": [.15, .92], "y": [.12, .88]},
                               "exposure_limit_stops": .65, "white_balance_blend": .25},
             "tools": {"python": platform.python_version(), "pillow": Image.__version__,
-                      "darktable": tool_version(args.darktable), "ffmpeg": tool_version(args.ffmpeg)},
+                      "rawpy": rawpy.__version__, "ffmpeg": tool_version(args.ffmpeg)},
             "segments": [],
         }
         atomic_json(manifest_path, manifest)

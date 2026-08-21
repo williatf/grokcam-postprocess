@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grokcam-postprocess"
+version = "2.0.0"
+description = "Archival GrokCam RAW post-processing"
+requires-python = ">=3.11"
+dependencies = ["numpy", "Pillow", "rawpy", "tifffile"]
+
+[project.scripts]
+grokcam-process-reel = "grokcam.cli.process_reel:main"
+grokcam-compare-reference = "grokcam.cli.compare_reference:main"
+
+[tool.setuptools.packages.find]
+include = ["grokcam*"]
