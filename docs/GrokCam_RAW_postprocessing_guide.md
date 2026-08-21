@@ -1,415 +1,1012 @@
-# Historical GrokCam RAW workflow notes
+# GrokCam RAW post-processing production guide
 
-> This document records the pre-consolidation Darktable workflow. Its referenced
-> standalone production script has been removed. Use the repository `README.md`
-> and `python -m grokcam.cli.process_reel` for current production processing.
+This is the operational and technical guide for the GrokCam production RAW
+processor established by commit `2b7abbe` and baseline tag
+`grokcam-production-v1`. It describes the current `grokcam/` package and is the
+authoritative processing guide.
 
-This guide documents the GrokCam DNG workflow developed for Todd's Regular 8 mm film captures. It is intended to be sufficient to repeat the work later without relying on memory or this conversation.
-
-Historical production script (removed): `grokcam_raw_production.py`.
-
-## The short version
-
-GrokCam captures one archival DNG per film frame. Post-processing runs on the Mac and:
-
-1. reads the DNG archive without modifying it;
-2. temporarily develops DNGs into TIFFs with Darktable;
-3. detects two sprocket holes at full resolution;
-4. stabilizes the film vertically and horizontally;
-5. applies an offline presentation crop independent of GrokCam's UI crop;
-6. rotates and mirrors the image into the intended viewing orientation;
-7. applies restrained exposure and color normalization;
-8. encodes verified 16 fps video segments;
-9. joins and verifies the complete review movie;
-10. deletes all reproducible working images and component videos.
-
-The permanent source is the DNG archive. The durable processing records are the production script, processing manifest, and verified output movie.
-
-## Files to preserve
-
-### Source archive
-
-The DNG directory is the archival camera capture. For the current test project it is:
-
-```text
-/Volumes/AFP SG1TB/GrokCam/projects/RAW_Test/raw/
-```
-
-Never edit, rename, recompress, or delete the DNGs as part of post-processing. Back them up separately. The production pipeline opens them read-only.
-
-### Production script
-
-```text
-grokcam_raw_production.py
-```
-
-This is the complete batch processor. Keep the exact version used for a finished movie with that movie and its manifest.
-
-### Processing manifest
-
-```text
-processing_manifest.json
-```
-
-The manifest records:
-
-- pipeline and tool versions;
-- source location and frame range;
-- frame rate and batch size;
-- offline crop definition;
-- sprocket location and crop coordinates for every frame;
-- rejected or interpolated detections;
-- normalization measurements and corrections;
-- segment verification data and checksums;
-- final movie verification data and checksum;
-- which temporary artifacts were removed.
-
-The manifest does not replace the DNGs. It is the recipe and audit trail needed to reproduce the derived movie.
-
-### Final review movie
-
-The completed file is named similarly to:
-
-```text
-RAW_review_000001_003483_16fps.mp4
-```
-
-This is a viewing/review derivative, not a replacement for the DNG archive.
-
-## Required Mac software
-
-The tested setup uses:
-
-- Python 3 with NumPy and Pillow;
-- Darktable and `darktable-cli`;
-- FFmpeg and FFprobe;
-- macOS `caffeinate` while a long run is active.
-
-Paths used by the current script defaults:
-
-```text
-/Applications/darktable.app/Contents/MacOS/darktable-cli
-/usr/local/bin/ffmpeg
-/usr/local/bin/ffprobe
-```
-
-The Python runtime used during development was:
-
-```text
-/Users/todd/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
-```
-
-If that runtime no longer exists, create or select a Python environment containing NumPy and Pillow, then use its `python3` executable.
-
-Confirm the tools before beginning:
+The canonical command is:
 
 ```bash
-/Applications/darktable.app/Contents/MacOS/darktable-cli --version
-/usr/local/bin/ffmpeg -version | head -1
-/usr/local/bin/ffprobe -version | head -1
+/home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel
 ```
 
-## Before a long run
+The archival DNG directory is read-only source material. Processing creates
+derived work and output files elsewhere; it never edits, renames, moves, or
+deletes source DNGs.
 
-1. Mount the source volume and verify that the DNG directory is readable.
-2. Connect the Mac to power.
-3. Keep a MacBook lid open.
-4. Ensure that no other copy of the pipeline is running.
-5. Have at least 22 GiB free; 30 GiB or more is preferable.
-6. Start `caffeinate` in a separate Terminal window.
+## 1. Overview
 
-```bash
-caffeinate -dimsu
+The production path is:
+
+```text
+archival DNG
+    |
+    v
+learned Darktable-matched rawpy development
+    |
+    v
+temporary 16-bit RGB TIFF
+    |
+    v
+sprocket-pair detection
+    |
+    v
+batch validation and interpolation
+    |
+    v
+sprocket-relative subpixel crop
+    |
+    v
+orientation and contrast
+    |
+    v
+restrained temporal exposure/color normalization
+    |
+    v
+verified H.264 segment(s)
+    |
+    v
+verified final movie + processing manifest
 ```
 
-The displays may be turned off without stopping processing:
+The design has two anchors:
 
-```bash
-pmset displaysleepnow
+- The sprocket holes are the physical registration reference. The processor does
+  not substitute generic image stabilization.
+- RAW appearance comes from a frozen, versioned calibration learned against the
+  approved Darktable rendering. Production does not run Darktable per frame and
+  does not learn while processing a reel.
+
+## 2. Production architecture
+
+The important modules are grouped by responsibility rather than framework
+layers:
+
+| Area | Modules | Responsibility |
+|---|---|---|
+| Entry and composition | `grokcam.cli.process_reel`, `grokcam.pipeline` | Parse the supported CLI, load calibration, and invoke the production pipeline. |
+| Batch lifecycle | `grokcam.batch`, `grokcam.resume`, `grokcam.timing` | Select frames, lock an output, plan/resume batches, stage work, order the stages, report timing, clean work, and finalize. |
+| RAW development | `grokcam.raw_development` | Validate and apply the frozen rawpy-to-Darktable match and write 16-bit TIFFs. |
+| Film geometry | `grokcam.sprocket_detection`, `grokcam.registration`, `grokcam.image_processing` | Detect and validate sprocket anchors, calculate crop coordinates, resample, orient, and apply contrast. |
+| Presentation normalization | `grokcam.normalization` | Apply bounded, temporally smoothed exposure and channel corrections. |
+| Video and records | `grokcam.encoding`, `grokcam.manifest`, `grokcam.regression` | Encode and verify video, write atomic manifests, calculate hashes, and compare results with a reference. |
+| Configuration and data | `grokcam.config`, `grokcam.models` | Own calibrated constants and structured geometry/detection values. |
+
+Data flow through one batch is:
+
+```text
+RunOptions + ProductionCalibration
+              |
+              v
+        select contiguous DNGs
+              |
+              v
+   threaded DarktableMatchedDeveloper
+              |
+              v
+      detect each TIFF -> validate batch
+              |
+              v
+      crop/register each frame -> JPEG
+              |
+              v
+      normalize sequence -> JPEG
+              |
+              v
+       FFmpeg encode -> verify -> manifest
 ```
 
-Stop `caffeinate` afterward with Control-C.
+## 3. Canonical production command
 
-## Recommended test run
+### Runtime prerequisites
 
-Always test a short contiguous range before processing a new reel or changing software versions. From the directory containing the production script:
+Use the project virtual environment at `/home/todd/telecine/.venv`. The Python
+package dependencies are NumPy, Pillow, rawpy, and tifffile. Production also
+requires FFmpeg and FFprobe; it does not require Darktable. Confirm the external
+video tools before a long run:
 
 ```bash
-PYTHON="/Users/todd/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
+/home/todd/telecine/.venv/bin/python -c \
+  'import numpy, PIL, rawpy, tifffile; print(rawpy.__version__, rawpy.libraw_version)'
+ffmpeg -version | head -1
+ffprobe -version | head -1
+```
 
-"$PYTHON" grokcam_raw_production.py \
-  "/Volumes/AFP SG1TB/GrokCam/projects/RAW_Test/raw" \
-  "/path/to/RAW_Test_short_test" \
-  --first 1400 \
-  --last 1499 \
-  --batch-frames 100 \
+The lock implementation uses POSIX `flock`, so this production command targets
+the current Linux environment.
+
+### Basic syntax
+
+```bash
+/home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
+  RAW_DIR OUTPUT_DIR [options]
+```
+
+`RAW_DIR` and `OUTPUT_DIR` are positional and required.
+
+### Recommended normal-reel command
+
+```bash
+/home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
+  /mnt/GrokCam/projects/RAW_Test/raw \
+  /mnt/GrokCam/projects/RAW_Test/outputs/production-v1 \
+  --batch-frames 300 \
+  --fps 16 \
   --jobs 3 \
   --minimum-free-gib 22
 ```
 
-Inspect the resulting movie for orientation, crop, color, exposure, and registration before running the full set.
+The CLI default batch size is 960 frames. A 300-frame batch is a conservative
+operational choice that reduces peak disposable storage and restart cost.
 
-## Full test-set command
+### Supported arguments
 
-The first 960-frame test segment was retained. Because Time Machine snapshots can temporarily retain deleted TIFF blocks, subsequent work uses smaller 300-frame batches:
+| Argument | Default | Meaning |
+|---|---:|---|
+| `raw_dir` | required | Directory containing the source `frame_*.dng` sequence. |
+| `output_dir` | required | Dedicated directory for the manifest, staging, segments, and final movie. It is created if missing. |
+| `--first N` | all | Select frames numbered `N` or higher. Inclusive. |
+| `--last N` | all | Select frames numbered `N` or lower. Inclusive. |
+| `--batch-frames N` | `960` | Maximum frames in each independently encoded batch. Must be positive. |
+| `--fps N` | `16` | Input sequence and output movie frame rate. |
+| `--jobs N` | `3` | Maximum concurrent rawpy development workers. At least one worker is used. |
+| `--crop-preset loose` | `loose` | The only supported crop preset. |
+| `--ffmpeg PATH` | discovered in `PATH`, otherwise `/usr/local/bin/ffmpeg` | FFmpeg executable. |
+| `--ffprobe PATH` | discovered in `PATH`, otherwise `/usr/local/bin/ffprobe` | FFprobe executable. |
+| `--minimum-free-gib N` | `22.0` | Refuse to start or continue a batch below this free-space threshold on the output filesystem. |
+| `--plan-only` | off | Show selected remaining ranges and batches without processing images. |
+| `--dry-run` | off | Exact alias for `--plan-only`. |
+| `--calibration FILE` | none | Advanced JSON overrides for production calibration. Not needed for normal v1 processing. |
+| `--match-report FILE` | repository v1 artifact | Explicitly override the learned match report. Avoid for normal v1 production. |
+| `-h`, `--help` | — | Print the authoritative CLI usage and exit. |
+
+The current configuration loader accepts detector, crop, match-report, and
+contrast overrides. It also parses normalization-related keys, but the v1
+normalizer uses its frozen code constants directly; do not expect those JSON
+keys to change normalization behavior.
+
+### Short representative test
+
+Use a new output directory so the test manifest cannot be confused with a full
+reel:
 
 ```bash
-PYTHON="/Users/todd/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
-
-"$PYTHON" grokcam_raw_production.py \
-  "/Volumes/AFP SG1TB/GrokCam/projects/RAW_Test/raw" \
-  "/path/to/RAW_Test_production" \
-  --batch-frames 300 \
-  --fps 16 \
-  --jobs 3 \
-  --crop-preset loose \
-  --minimum-free-gib 22 \
-  2>&1 | tee "/path/to/RAW_Test_production/run.log"
+/home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
+  /mnt/GrokCam/projects/RAW_Test/raw \
+  /home/todd/telecine/grokcam-postprocess/work/reel-smoke-test \
+  --first 120 \
+  --last 123 \
+  --batch-frames 4 \
+  --jobs 2 \
+  --minimum-free-gib 1
 ```
 
-Using `tee` preserves the terminal progress as `run.log`. The current pipeline run initiated through Codex may not have that log; future manual runs should use it.
+### Capturing a console log
 
-### Command options
+The application writes progress and stage timing to stdout/stderr; it does not
+create a standalone log file. Capture one with the shell when desired:
 
-- `--first N`: begin at frame N.
-- `--last N`: end at frame N.
-- `--batch-frames N`: maximum temporary batch size. The default is 960.
-- `--fps N`: review-movie frame rate. Regular 8 mm is being treated as 16 fps.
-- `--jobs N`: concurrent Darktable workers. Three is the tested setting.
-- `--crop-preset loose`: use the current presentation crop.
-- `--minimum-free-gib N`: refuse to start or continue a batch below this free-space threshold.
-- `--plan-only`: show which verified ranges will be preserved and which batches remain, without processing images.
-- `--darktable`, `--ffmpeg`, and `--ffprobe`: override tool paths if they move.
+```bash
+set -o pipefail
+mkdir -p /mnt/GrokCam/projects/RAW_Test/outputs/production-v1
+/home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
+  /mnt/GrokCam/projects/RAW_Test/raw \
+  /mnt/GrokCam/projects/RAW_Test/outputs/production-v1 \
+  --batch-frames 300 --fps 16 --jobs 3 --minimum-free-gib 22 \
+  2>&1 | tee /mnt/GrokCam/projects/RAW_Test/outputs/production-v1/run.log
+```
 
-## What happens inside a batch
+## 4. Input and output directory structure
 
-### 1. DNG development
+### Input requirements
 
-Darktable develops each DNG into a temporary TIFF. Each worker receives an isolated temporary Darktable configuration so workers do not contend for one database.
-
-Darktable's `data.db` files are disposable application databases. The script removes each worker configuration immediately after conversion. They are not archival metadata.
-
-### 2. Full-resolution sprocket detection
-
-The detector examines the left film-edge region of the developed 2028 × 1520 frame. It finds two adjacent bright sprocket holes and checks:
-
-- expected hole height and width;
-- expected vertical pitch between holes;
-- horizontal agreement between the two holes;
-- overall candidate geometry.
-
-Using a pair is more robust than trusting a single bright rectangle. The midpoint becomes the film-coordinate anchor.
-
-### 3. Rejection and interpolation
-
-Isolated measurements that move implausibly far from their local neighbors are rejected. If a measurement cannot be trusted, its coordinates are interpolated from accepted neighboring frames. The manifest explicitly records whether every frame was detected, accepted, or interpolated.
-
-### 4. Offline crop and registration
-
-The post-processing crop does not use GrokCam's project/UI crop. The `loose` crop is defined relative to the detected sprocket-pair midpoint:
+The processor searches only for lowercase filenames matching:
 
 ```text
-x offset: +159 pixels
-y offset: -413 pixels
-width:    1133 pixels
-height:    900 pixels
+frame_*.dng
 ```
 
-The crop uses fractional-pixel bicubic sampling. This avoids one-pixel stepping and corrects both vertical registration and horizontal film weave. The loose crop intentionally preserves some film edge or adjacent-frame character.
+The integer after the final underscore is the frame number. A typical source is:
 
-After cropping, the image is rotated 180 degrees and mirrored horizontally to match the chosen viewing orientation.
-
-### 5. Restrained normalization
-
-Measurements come from the interior picture area, excluding most sprocket and border content. The processor applies bounded, temporally smoothed exposure and white-balance corrections. It deliberately avoids making every frame identical, preserving genuine scene brightness, indoor warmth, and the character of aged reversal film.
-
-The first completed segment establishes a consistent reel-wide median-luminance target. Later batches reuse it to reduce visible batch-boundary changes.
-
-### 6. Encoding and verification
-
-Each batch is encoded as H.264 at 16 fps. FFprobe confirms frame count and stream metadata, and FFmpeg fully decodes the segment to detect corrupt output.
-
-Only after verification does cleanup occur.
-
-### 7. Final joining and retention
-
-Verified segments are losslessly concatenated. The joined movie is probed and fully decoded again. Once it passes:
-
-- temporary TIFFs are gone;
-- Darktable configurations and databases are gone;
-- registered JPEGs are gone;
-- normalized JPEGs are gone;
-- component segment videos are removed;
-- the final movie and manifest remain.
-
-## Disk-space behavior
-
-At 16 fps, one minute is 960 frames. A one-minute batch generally needs approximately:
-
-- 14–16 GiB for temporary TIFFs;
-- 1 GiB or less for temporary JPEG derivatives;
-- additional margin for encoding, databases, filesystem behavior, and incomplete work.
-
-Plan on 22–26 GiB peak additional use and reserve roughly 30 GiB for comfort. The script checks free space before starting and before every batch.
-
-For approximately 22,735 frames, batching keeps peak working use near one batch instead of requiring hundreds of gigabytes of simultaneous TIFF storage.
-
-## Monitoring progress
-
-Count only canonical TIFF filenames. This avoids counting any unexpected retry suffixes:
-
-```bash
-find "/path/to/RAW_Test_production/.staging" \
-  -type f -name 'frame_??????.tif' | wc -l
+```text
+/mnt/GrokCam/projects/RAW_Test/raw/
+├── frame_000001.dng
+├── frame_000002.dng
+├── frame_000003.dng
+└── ...
 ```
 
-The number rises toward the current batch size, then returns to zero after that batch is verified and cleaned.
+After `--first` and `--last` filtering, frame numbers must be contiguous. Uppercase
+`.DNG`, unrelated names, and a sequence with a missing number are not accepted by
+the current enumerator.
 
-Check working storage:
+Never use the archival RAW directory as `OUTPUT_DIR`.
 
-```bash
-du -sh "/path/to/RAW_Test_production"
+### Output during processing
+
+For a batch covering frames 1–300, the output may temporarily look like:
+
+```text
+production-v1/
+├── .pipeline.lock
+├── .staging/
+│   └── segment_000001_000300/
+│       ├── tiff/
+│       │   ├── frame_000001.tif
+│       │   └── ...
+│       ├── registered/
+│       │   ├── frame_000001.jpg
+│       │   └── ...
+│       └── normalized/
+│           ├── frame_000001.jpg
+│           └── ...
+├── segments/
+│   ├── frames_000001_000300_16fps.mp4
+│   └── frames_000301_000600_16fps.mp4
+└── processing_manifest.json
 ```
 
-Check free disk space:
+The segment filename currently contains the literal suffix `_16fps` even when a
+non-default `--fps` is selected. The encoded rate follows `--fps`; the segment
+basename is a v1 naming quirk. The final movie name uses the actual requested
+rate.
 
-```bash
-df -h "/path/to/RAW_Test_production"
+### Output after successful finalization
+
+For frames 1–3483 at 16 fps:
+
+```text
+production-v1/
+├── .pipeline.lock
+├── .staging/
+├── RAW_review_000001_003483_16fps.mp4
+├── processing_manifest.json
+└── run.log                         # only if captured with tee
 ```
 
-Check for pipeline processes:
+After final verification, component segment videos and `segments.txt` are
+deleted, and `segments/` is removed if empty. Batch TIFFs and both JPEG sequences
+are also deleted after their segment is verified. The empty `.staging/` directory
+and lock file may remain.
 
-```bash
-pgrep -fl grokcam_raw_production
+The lock file's existence does not mean a process is running: exclusivity is
+provided by an operating-system `flock`, which is released when the process
+exits.
+
+## 5. RAW development and Darktable matching
+
+Production does **not** invoke Darktable for each reel frame. It uses rawpy and
+the frozen artifact `calibrations/darktable_match_v1.json` to reproduce the
+approved Darktable appearance.
+
+For each DNG, `DarktableMatchedDeveloper` performs this exact sequence:
+
+1. Read the DNG with rawpy.
+2. Read the first three embedded camera-white-balance values and form RGBG as
+   `[R, G, B, G]`.
+3. Multiply by the frozen RGBG correction:
+
+   ```text
+   [1.06982421875, 1.0, 1.0991804599761963, 1.0]
+   ```
+
+4. Call rawpy with:
+   - AHD demosaicing;
+   - `use_camera_wb=False` and the calculated `user_wb`;
+   - 16-bit output;
+   - no automatic brightening;
+   - linear gamma `(1, 1)`;
+   - sRGB output color space.
+5. Convert the 16-bit result to float32 `[0,1]`.
+6. Build 13 features per pixel: constant, linear RGB, square-root RGB, squared
+   RGB, and the three cross-channel products.
+7. Apply the fitted 13×3 coefficients and clip to `[0,1]`.
+8. Map each channel through its monotonic 256-entry LUT using linear
+   interpolation, then clip again.
+9. Round to unsigned 16-bit and write a TIFF with tifffile.
+
+The matrix/LUT combination captures the selected Darktable color and tonal
+behavior without invoking Darktable during normal production. It was fitted
+offline from paired renders of representative frames.
+
+## 6. Frozen production calibration
+
+Production v1 owns two repository files:
+
+```text
+calibrations/darktable_match_v1.json
+calibrations/darktable_match_v1.metadata.json
 ```
 
-There should be exactly one pipeline process. Darktable workers may appear while conversion is active.
+The artifact SHA-256 is:
 
-Inspect completed segments in the manifest:
+```text
+d5a4526b6b5e38fd9d7b37876b0ec39cb37a370d066419433db38f978cb3dc96
+```
+
+Verify it from the repository root:
 
 ```bash
-python3 - <<'PY'
+sha256sum calibrations/darktable_match_v1.json
+```
+
+The metadata identifies calibration ID `grokcam-darktable-match-v1`, adoption
+status `golden_production`, 24 training frames, eight holdout frames, 2028×1520
+RAW/processed dimensions, RGBG CFA assumptions, and the reference software:
+
+| Component | Recorded version |
+|---|---:|
+| Python | 3.14.4 |
+| NumPy | 2.5.2 |
+| rawpy | 0.27.0 |
+| LibRaw | 0.22.1 |
+| Darktable used for fitting | 5.4.1 |
+
+Before the first development batch, production reads the JSON and validates the supported model name,
+13 coefficient rows, three 256-entry LUTs, and four white-balance values. It
+does not write the artifact. A new manifest records its resolved path, SHA-256,
+model, creation date, and training/holdout identifiers.
+
+Inference is deterministic for fixed DNG bytes, calibration bytes, code,
+rawpy/LibRaw/NumPy/tifffile versions, and compatible floating-point behavior.
+Rawpy or LibRaw changes can alter demosaicing or metadata interpretation even
+when the JSON is unchanged, so exact upgrades require the v1 regression.
+
+## 7. Sprocket detection
+
+Detection operates in full developed-frame pixel coordinates: origin `(0,0)` is
+the upper-left of the approximately 2028×1520 RGB TIFF; `x` increases rightward
+and `y` downward.
+
+Current detector constants are:
+
+| Parameter | Value |
+|---|---:|
+| Search region | `x = 100..569` (`100:570`) |
+| Bright percentile | 99.0 |
+| Threshold multiplier | 0.90 |
+| Minimum bright pixels in a row | 131 effectively (`sum > 130`) |
+| Valid bright-band height | 180–330 px inclusive |
+| Expected pair pitch | 785 px |
+| Pitch tolerance | 100 px |
+| Minimum qualifying bright columns | 200 |
+| Required per-column band fill | greater than 55% |
+| Expected hole width used by score | 365 px |
+| Horizontal batch outlier limit | strictly less than 12 px |
+| Vertical batch outlier limit | strictly less than 45 px |
+
+The detector averages RGB to luminance inside the left search strip. Pixels above
+90% of the strip's 99th-percentile luminance are marked bright. Consecutive rows
+with enough bright pixels form horizontal bands. Adjacent bands become pair
+candidates when their center pitch is close to 785 px and each band contains a
+wide, consistently bright horizontal span.
+
+Each candidate receives a lower-is-better score composed of:
+
+- pitch error;
+- twice the difference between the two horizontal centers;
+- 0.2 times the difference between mean measured width and 365 px.
+
+The best candidate supplies `cx` as the mean horizontal center and `cy` as the
+midpoint between the two band centers. If no candidate survives, that frame has
+no direct detection.
+
+### Batch validation and interpolation
+
+Direct detections are validated separately in `x` and `y` against a five-frame
+local median with edge padding. A measurement is accepted only when it is finite
+and lies strictly within the 12 px horizontal and 45 px vertical limits.
+
+For each coordinate, rejected or missing positions are filled with NumPy linear
+interpolation between accepted measurements. At a batch edge, interpolation
+holds the nearest accepted value. If the batch has no usable measurements for an
+axis, processing stops with `No usable sprocket measurements in batch`.
+
+The current production path has one detector plus validation/interpolation. It
+does not contain a second fallback detector or phase model.
+
+## 8. Registration and cropping
+
+Detection measures film position; registration uses that measurement to place a
+fixed presentation window. They are distinct stages.
+
+For each validated/interpolated anchor:
+
+```text
+crop_left = anchor_x + 159.0
+crop_top  = anchor_y - 413.0
+width     = 1133
+height    = 900
+```
+
+The coordinates can be fractional. Pillow's `EXTENT` transform resamples the
+1133×900 crop with bicubic interpolation, correcting horizontal weave and
+vertical transport drift without integer-pixel stepping.
+
+After cropping, the processor:
+
+1. rotates the frame 180 degrees without expanding it;
+2. flips it horizontally;
+3. applies Pillow contrast factor `1.04`;
+4. writes a quality-95 JPEG with chroma subsampling disabled.
+
+The registered and normalized still frames are 1133×900. FFmpeg pads odd video
+dimensions to even values, so the encoded video is normally 1134×900. There is
+no current phase handling, temporal crop smoothing, or generic content-based
+stabilization. Each crop follows the physical sprocket anchor; only rejected
+anchor measurements are interpolated.
+
+## 9. Temporal normalization
+
+Normalization is deliberately restrained. It reduces modest frame-to-frame
+exposure and channel-balance variation while avoiding aggressive restoration or
+making every scene look neutral.
+
+For each registered JPEG:
+
+1. Measure the picture aperture `x = 15%..92%`, `y = 12%..88%`.
+2. Calculate Rec. 709-like luma weights `[0.2126, 0.7152, 0.0722]`.
+3. Prefer pixels with luma between `0.03` and `0.96`; fall back to the whole ROI
+   if fewer than 100 qualify.
+4. Set the reel target from the first processed segment's median frame luma and
+   store it as `normalization.target_median_luma`. Later segments reuse it.
+5. Calculate per-frame exposure and clamp it to ±0.65 stops.
+6. Calculate channel gains from the geometric-mean neutral level, clamp raw
+   gains to `[0.78, 1.28]`, then apply only 25% of that correction.
+7. Smooth exposure and RGB gains with a radius-four rolling median—up to nine
+   frames within the current segment.
+8. Apply `x / (1 + 0.12x)` soft compression and clip to `[0,1]`.
+9. Write quality-95 JPEGs with chroma subsampling disabled.
+
+The normalizer does not identify scene neutrals, perform gray-world correction,
+remove film fading/dye crossover, recover clipped channels, or force distinct
+scenes to a single appearance. Smoothing is calculated inside each independently
+processed segment; it does not use neighboring JPEGs from another segment.
+
+## 10. Batch processing
+
+### Enumeration and planning
+
+Frames are sorted numerically by the suffix after the final underscore. The
+selected range must be contiguous. Remaining frames are divided into contiguous
+groups and then into batches no larger than `--batch-frames`.
+
+### Locking and disk checks
+
+The processor opens `OUTPUT_DIR/.pipeline.lock` and requests a nonblocking
+exclusive `flock`. A second process targeting the same output exits immediately.
+Free space on the output filesystem is checked once before planning and again
+before every batch.
+
+### Stage order
+
+Within each batch:
+
+1. Recreate `.staging/segment_FIRST_LAST/` from scratch.
+2. Develop DNGs concurrently into 16-bit TIFFs.
+3. Detect sprockets serially and validate/interpolate the batch.
+4. Crop, orient, and write registered JPEGs.
+5. Delete TIFFs.
+6. Normalize registered JPEGs.
+7. Encode a temporary H.264 segment.
+8. Verify its frame count with FFprobe and fully decode it with FFmpeg.
+9. Atomically replace the final segment path and write its manifest record.
+10. Delete that batch's entire staging directory.
+
+Encoding uses libx264, preset `fast`, CRF 15, one encoding thread, `yuv420p`, and
+even-dimension padding. The sequence frame rate and movie rate both use `--fps`.
+
+### Finalization
+
+When verified segment ranges cover the selected frame numbers exactly, the
+processor writes `segments.txt`, concatenates codec-identical segments with
+`-c copy`, verifies final frame count, and fully decodes the temporary final
+movie. Only then does it atomically install the final movie, hash it, update the
+manifest, remove component segments, and remove `segments.txt`.
+
+Verified segments bound data loss and restart cost: an interruption affects at
+most the current batch instead of requiring one enormous uninterrupted render.
+
+## 11. Resume and recovery
+
+### What counts as completed
+
+At startup, a segment is reusable only when:
+
+- its manifest entry has `verified: true`; and
+- the file named by its `video` field currently exists.
+
+Those frame numbers are removed from the new processing plan. The processor does
+not re-probe or decode an existing segment during resume; it trusts the manifest
+flag and file existence until final verification.
+
+### Normal interruption recovery
+
+Restart with the same raw directory, output directory, frame range, fps, and
+calibration settings:
+
+```bash
+/home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
+  /mnt/GrokCam/projects/RAW_Test/raw \
+  /mnt/GrokCam/projects/RAW_Test/outputs/production-v1 \
+  --batch-frames 300 --fps 16 --jobs 3 --minimum-free-gib 22
+```
+
+The lock from the dead process is automatically released by the OS even though
+`.pipeline.lock` remains. Previously verified component segments are preserved.
+An incomplete staging directory for the next batch is deleted and regenerated.
+An unverified `.tmp.mp4` is not treated as complete and is overwritten by the
+next encoding attempt.
+
+The existing manifest receives a new in-memory `batch_history` entry when loaded;
+it becomes durable on the next manifest write. Completed segment records and the
+first segment's normalization target are reused.
+
+### Suspected corrupt segment
+
+Because resume trusts an existing verified segment, quarantine a suspect file so
+its manifest path is absent, then rerun the same command. For example:
+
+```bash
+mkdir -p /mnt/GrokCam/projects/RAW_Test/outputs/production-v1/quarantine
+mv /mnt/GrokCam/projects/RAW_Test/outputs/production-v1/segments/frames_000301_000600_16fps.mp4 \
+   /mnt/GrokCam/projects/RAW_Test/outputs/production-v1/quarantine/
+```
+
+The missing segment is planned again, and the new record replaces the record
+with the same `first`/`last` range. Preserve the quarantined file and manifest
+until the cause is understood.
+
+### Important completed-output behavior
+
+After successful finalization, component segments are deliberately deleted and
+their manifest records receive `retained: false`. Therefore, rerunning the same
+command against an already finalized output is **not** a no-op: the segment files
+no longer exist, so all frames are considered remaining and will be processed
+again. Do not rerun a completed output directory merely to “check” it. Inspect
+the final manifest/movie or use a new output directory for a new proof.
+
+Also keep one output directory tied to one frame selection and processing recipe.
+The current loader does not reject every possible argument mismatch against an
+existing manifest.
+
+## 12. Processing manifest
+
+`processing_manifest.json` is written atomically through a temporary JSON file
+and `os.replace`. It is the processing recipe, diagnostic record, segment index,
+and final verification record—not a replacement for the source DNGs.
+
+### Top-level fields
+
+| Field | Meaning |
+|---|---|
+| `pipeline`, `version`, `created` | Production identity and manifest creation time. |
+| `raw_dir`, `source_policy` | Resolved source path and its `read_only` policy. |
+| `frame_range`, `frame_count` | Selected inclusive range and count. |
+| `fps`, `batch_frames` | Requested movie rate and batch setting. |
+| `raw_development_calibration` | Calibration path, SHA-256, model, creation date, and training/holdout frames. |
+| `crop_preset`, `crop` | `loose` and the four crop values. |
+| `normalization` | Picture aperture, bounds/blend metadata, and eventually `target_median_luma`. |
+| `tools` | Python, Pillow, rawpy, and FFmpeg versions recorded at creation. |
+| `segments` | Per-segment state, verification, timing, and frame records. |
+| `batch_history` | Later invocation start times/batch sizes once written. |
+| `final` | Final movie path, bytes, SHA-256, verification, and completion time. |
+| `retention` | What the successful run retained and removed. |
+
+### Segment fields
+
+Each segment records:
+
+```text
+first, last, frames, video, video_bytes, video_sha256
+verified, verification, reference_sprocket_x
+detected, accepted, interpolated
+elapsed_seconds, completed, frame_records, retained
+```
+
+`verification` contains FFprobe stream/format data. `elapsed_seconds` is total
+batch wall time. Individual stage timings are printed to the console but are not
+currently persisted in the manifest.
+
+### Frame records
+
+Each frame record contains:
+
+```text
+frame, source_name, source_bytes
+anchor_x, anchor_y
+detected, accepted, detector_score
+crop_left, crop_top
+normalization
+```
+
+The `normalization` object contains `median_luma`, `channel_median`,
+`exposure_gain`, and `channel_gains_rgb`.
+
+There is no per-frame `interpolated` field in the current manifest. Interpret a
+frame with `accepted: false` as using an interpolated anchor. `detected` tells
+whether a direct candidate existed; a detected measurement can still be rejected
+as an outlier. The segment-level `interpolated` count is the number of unaccepted
+frame measurements.
+
+Pretty-print the manifest with:
+
+```bash
+/home/todd/telecine/.venv/bin/python -m json.tool \
+  /mnt/GrokCam/projects/RAW_Test/outputs/production-v1/processing_manifest.json \
+  | less
+```
+
+List non-accepted frame records without extra dependencies:
+
+```bash
+/home/todd/telecine/.venv/bin/python - <<'PY'
 import json
 from pathlib import Path
 
-path = Path("/path/to/RAW_Test_production/processing_manifest.json")
-data = json.loads(path.read_text())
-print("Selected frames:", data["frame_count"])
-for segment in data.get("segments", []):
-    print(segment["first"], segment["last"], "verified=", segment["verified"])
-print("Final:", data.get("final", {}).get("verified", False))
+path = Path("/mnt/GrokCam/projects/RAW_Test/outputs/production-v1/processing_manifest.json")
+manifest = json.loads(path.read_text())
+for segment in manifest.get("segments", []):
+    for frame in segment.get("frame_records", []):
+        if not frame.get("accepted", False):
+            print(frame["frame"], frame["detected"], frame["detector_score"],
+                  frame["anchor_x"], frame["anchor_y"],
+                  frame["crop_left"], frame["crop_top"])
 PY
 ```
 
-## Resume and interruption
+## 13. Diagnostics and troubleshooting
 
-The output directory contains `.pipeline.lock`. The script uses an operating-system lock to prevent two pipeline copies from intentionally using the same output directory. A resumed run preserves any verified segment files recorded in the manifest even if `--batch-frames` is changed; only uncovered contiguous ranges are divided into new batches.
+### No DNGs found
 
-Preview a resume plan safely:
+Message:
+
+```text
+No DNG frames selected
+```
+
+Check that the input contains lowercase `frame_*.dng` names and that the
+inclusive `--first`/`--last` selection actually intersects them:
 
 ```bash
-python3 grokcam_raw_production.py \
-  "/path/to/raw" \
-  "/path/to/production-output" \
+find /mnt/GrokCam/projects/RAW_Test/raw -maxdepth 1 -type f -name 'frame_*.dng' | sort | head
+```
+
+If the selected numeric sequence has a gap, the processor instead reports:
+
+```text
+Selected DNG sequence is not contiguous
+```
+
+### Insufficient disk space
+
+At startup:
+
+```text
+Only N.N GiB free; need N.N GiB
+```
+
+Between batches:
+
+```text
+Stopping safely: only N.N GiB free
+```
+
+Inspect both relevant filesystems before a long run:
+
+```bash
+df -h /home/todd/telecine/grokcam-postprocess /mnt/GrokCam
+```
+
+Free space or choose a smaller `--batch-frames`; do not lower the safety threshold
+without understanding peak TIFF/JPEG usage.
+
+### Calibration missing or invalid
+
+Verify the production artifact and hash:
+
+```bash
+test -f calibrations/darktable_match_v1.json
+sha256sum calibrations/darktable_match_v1.json
+```
+
+The expected SHA-256 is
+`d5a4526b6b5e38fd9d7b37876b0ec39cb37a370d066419433db38f978cb3dc96`.
+Errors such as `unsupported match model`, `expected 13 transform rows`,
+`expected three 256-entry LUTs`, or `expected four white-balance values` mean the
+selected report is not a valid production-v1 artifact. Do not repair it in place;
+restore the version-controlled file.
+
+### Sprocket detection failure
+
+A single missing or rejected detection is recoverable through interpolation. A
+batch with no usable measurements stops with:
+
+```text
+No usable sprocket measurements in batch
+```
+
+Retain the staging data and console log if present, inspect the source range, and
+try a smaller test range in a new output directory. Do not adjust detector
+constants as part of recovering the production-v1 run; that would create a new
+algorithm/calibration variant requiring regression.
+
+### Interpolated detections
+
+Inspect segment `interpolated` counts and frame records with `accepted: false`.
+Isolated interpolation is expected recovery behavior, but consecutive or
+frequent rejected frames warrant visual review of framing and source sprockets.
+
+### Abnormal framing
+
+Compare `anchor_x`, `anchor_y`, `crop_left`, and `crop_top` with neighboring
+records. By definition:
+
+```text
+crop_left - anchor_x = 159.0
+crop_top  - anchor_y = -413.0
+```
+
+If those relationships are correct but the picture is poorly framed, inspect
+the measured/interpolated anchor and source frame rather than treating crop and
+detection as the same problem.
+
+### Encoding failure
+
+Confirm executables and versions:
+
+```bash
+ffmpeg -version | head -1
+ffprobe -version | head -1
+```
+
+Use `--ffmpeg` and `--ffprobe` only if the executables are elsewhere. The raised
+`Command failed (...)` message includes the exact command and captured stderr.
+No segment manifest record is committed until encoding and verification succeed.
+
+### Corrupt or incomplete segment
+
+Incomplete `.tmp.mp4` files are not resumable and are overwritten. If a segment
+marked verified is suspected corrupt, quarantine it as described in
+[Resume and recovery](#resume-and-recovery), then restart the same command.
+
+### Interrupted processing
+
+Do not delete `.pipeline.lock` merely because it remains. First confirm no
+processor is active:
+
+```bash
+pgrep -af 'grokcam.cli.process_reel'
+```
+
+If no process is running, rerun the exact command. The OS lock is already free.
+
+### Final verification failure
+
+The final movie is first created as `RAW_review_...tmp.mp4`; it is not installed
+at the final path until FFprobe frame-count verification and a complete FFmpeg
+decode succeed. Preserve the manifest, segments, temporary movie, and log for
+diagnosis. Correct the external/tool/storage problem and rerun; verified segment
+files can be reused while they still exist.
+
+## 14. Planning a reel before processing
+
+Always plan a large reel first:
+
+```bash
+/home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
+  /mnt/GrokCam/projects/RAW_Test/raw \
+  /mnt/GrokCam/projects/RAW_Test/outputs/production-v1 \
   --batch-frames 300 \
+  --fps 16 \
+  --jobs 3 \
+  --minimum-free-gib 22 \
   --plan-only
 ```
 
-For a normal Terminal run, interrupt once with Control-C and allow active Darktable commands to stop. Do not immediately launch another copy while workers are still present.
+The output reports:
 
-Before resuming, verify:
+- verified segment ranges that will be preserved;
+- total remaining frame count;
+- number of batches;
+- each planned inclusive range and its frame count.
 
-```bash
-pgrep -fl grokcam_raw_production
-pgrep -fl darktable-cli
-```
+Planning also validates that DNG selection is nonempty and contiguous and that
+the output filesystem meets the free-space threshold.
 
-If neither command reports an old worker, rerun the exact original command. Verified segments recorded in the manifest are skipped. An incomplete staging batch is recreated.
+`--plan-only` performs no image development or encoding, but it is not completely
+filesystem-neutral: it creates the output directory, lock file, `.staging/`, and
+`segments/`; on a new output it also creates the initial manifest and queries the
+FFmpeg version. Use the same dedicated output directory intended for processing.
 
-Do not manually edit `processing_manifest.json` to force a segment to appear complete.
+## 15. Calibration versus production
 
-If the script says another pipeline is using the directory, first determine whether a genuine process is active. Do not simply delete `.pipeline.lock`; deleting the file does not stop the process that holds the operating-system lock.
-
-## Troubleshooting
-
-### TIFF count exceeds the batch size
-
-Stop and investigate. Look for suffixes such as `_01.tif` or `_02.tif`:
-
-```bash
-find "/path/to/RAW_Test_production/.staging" \
-  -type f -name '*_[0-9][0-9].tif' | head
-```
-
-This can indicate overlapping or lingering Darktable workers. Ensure only one pipeline is active before deleting an incomplete, reproducible staging batch and restarting.
-
-### Source volume disconnects
-
-Stop the pipeline, remount the volume, confirm that the expected DNG sequence is readable, and resume with the same command. Never point the script at a partially copied substitute directory without verifying completeness.
-
-### Disk becomes too full
-
-The script stops before starting another batch when free space is below the threshold. An interrupted current batch can be removed because its TIFFs and JPEGs are reproducible. Preserve the DNG archive, manifest, verified movies, and production script.
-
-### Sprocket failures or bad registration
-
-Review the per-frame fields in the manifest:
-
-- `detected`
-- `accepted`
-- `detector_score`
-- `anchor_x`
-- `anchor_y`
-- `crop_left`
-- `crop_top`
-
-A small number of interpolated measurements is expected to be recoverable. Long runs of failures should be inspected visually before accepting the movie.
-
-### Exposure or color seams
-
-Confirm that all segments use the same `normalization.target_median_luma` recorded in the top-level manifest. Scene-by-scene grading is a later restoration stage and should not be confused with this restrained review normalization.
-
-## What this production pass does not yet do
-
-The current pipeline is a conservative review and registration pass. It does not yet perform:
-
-- scene detection or scene-specific grading;
-- temporal dust or scratch removal;
-- advanced grain management;
-- content-based stabilization;
-- sharpening intended to invent missing focus detail;
-- archival mezzanine encoding such as ProRes or FFV1;
-- automated focus-defect or recapture-range reporting.
-
-Those steps should be considered only after reviewing the full sprocket-stabilized movie. The DNG archive allows improved processing later without recapture, except where focus, clipping, or physical capture failure prevented detail from being recorded.
-
-## Recommended long-term archive layout
+These are separate systems:
 
 ```text
-Reel_Name/
-├── raw/                         # Original DNG sequence; immutable
-├── documentation/
-│   ├── GrokCam_RAW_postprocessing_guide.md
-│   └── grokcam_raw_production.py
-├── derivatives/
-│   ├── processing_manifest.json
-│   └── Reel_Name_review_16fps.mp4
-└── checksums/
-    └── raw_sha256.txt
+PRODUCTION
+
+reel DNGs
+    |
+    v
+frozen, approved darktable_match_v1.json
+    |
+    v
+deterministic processing under fixed software
+    |
+    v
+verified movie + manifest
 ```
 
-Keep at least two independent copies of the DNG archive and checksum manifest. A review MP4 is convenient, but it is never the archival master.
+```text
+CALIBRATION / RESEARCH
 
-## Final acceptance checklist
+named calibration DNG set
+    |
+    v
+sprocket-white measurement
+    |
+    v
+fresh Darktable references + rawpy candidates
+    |
+    v
+matrix/LUT fitting and holdout metrics
+    |
+    v
+candidate JSON comparison
+    |
+    v
+explicit human review and separate adoption change
+```
 
-- DNG count matches the capture inventory.
-- DNG checksum manifest has been retained and verified.
-- Exactly one pipeline instance performed the run.
-- Final movie frame count matches the selected DNG frame count.
-- Final movie fully decodes without errors.
-- Final checksum is present in the processing manifest.
-- Sprocket detection/interpolation counts are reviewed.
-- Orientation and crop are correct.
-- No unacceptable batch-boundary exposure or color shifts are visible.
-- Soft-focus or otherwise defective ranges are recorded for possible recapture.
-- Production script, guide, manifest, and movie are copied beside the archived reel.
+The production command imports no fitter and cannot automatically retrain,
+approve, or overwrite the golden artifact.
+
+## 16. Recalibrating in the future
+
+Recalibration may be justified by a camera/sensor/CFA change, capture illumination
+change, rawpy or LibRaw behavior change, a deliberate change to the approved
+Darktable rendering, or important source material poorly represented by v1.
+
+Keep archival DNGs in place; write candidate work under `work/` or another
+explicit review directory.
+
+### 1. Derive a candidate sprocket-white correction
+
+```bash
+/home/todd/telecine/.venv/bin/python -m tools.calibrate_sprocket_white \
+  --raw-dir /mnt/GrokCam/projects/RAW_Test/raw \
+  --work-dir work/sprocket-white-calibration \
+  --output-dir work/sprocket-white-candidate
+```
+
+Supported options are `--raw-dir`, `--work-dir`, and `--output-dir`. The v1
+sprocket reader assumes the documented 2028×1520 packed 12-bit BGGR layout.
+
+### 2. Fit a candidate Darktable match
+
+```bash
+/home/todd/telecine/.venv/bin/python -m tools.calibrate_darktable_match \
+  --raw-dir /mnt/GrokCam/projects/RAW_Test/raw \
+  --darktable /usr/bin/darktable-cli \
+  --wb-report work/sprocket-white-candidate/poc-report.json \
+  --work-dir work/darktable-match-calibration \
+  --output work/darktable-match-candidate.json \
+  --calibration-id grokcam-darktable-match-candidate-YYYYMMDD \
+  --jobs 3
+```
+
+Required options are `--raw-dir`, `--output`, and `--calibration-id`.
+`--darktable`, `--work-dir`, `--jobs`, `--wb-report`, `--keep-tiffs`, and
+`--force` are supported. Without `--wb-report`, the tool deliberately seeds from
+the frozen golden correction to reproduce the existing fit. Without `--force`,
+it refuses to overwrite an existing candidate output.
+
+Every generated report is marked `candidate_not_approved`; the tool never edits
+the production artifact.
+
+### 3. Compare candidate and production
+
+```bash
+/home/todd/telecine/.venv/bin/python -m tools.compare_darktable_calibrations \
+  calibrations/darktable_match_v1.json \
+  work/darktable-match-candidate.json \
+  --require-exact-fit
+```
+
+The comparison accepts `reference`, `candidate`, and optional
+`--require-exact-fit`. Exact fit is appropriate when reproducing v1. A deliberately
+new calibration instead requires review of learned-value differences, training
+and holdout metrics, representative images, and the full production regression.
+
+A candidate becomes production only through a separate, explicit versioned
+artifact/configuration change after human approval. Never overwrite v1 in place.
+See the [calibration guide](calibration.md) for source frame identifiers and
+full provenance.
+
+## 17. Production-v1 regression baseline
+
+Frames 120–123 are the golden refactoring proof. Production v1 requires:
+
+```text
+Anchor geometry difference: 0.0 px
+Crop geometry difference:   0.0 px
+Detector mismatches:        0
+Acceptance mismatches:      0
+```
+
+The golden proof movie SHA-256 is:
+
+```text
+bc13e671530a3483dce0f510c1420ad32cf481c942956a8221197297541c5f76
+```
+
+The test suite freezes the four anchors/crops and movie hash. The comparison CLI
+checks a new manifest against the reference:
+
+```bash
+/home/todd/telecine/.venv/bin/python -m grokcam.cli.compare_reference \
+  work/matched-timed-proof/processing_manifest.json \
+  work/new-proof/processing_manifest.json
+```
+
+This protects geometry, detector decisions, crop registration, learned RAW
+appearance, normalization, encoding arguments, and final deterministic output
+from accidental change during refactoring. A changed algorithm should establish
+a deliberately reviewed new baseline rather than weakening the v1 check.
+
+## 18. Research code
+
+`research/` contains retained investigations into rawpy renderer/demosaic
+choices, downstream normalization, and residual restoration casts. A small
+geometry adapter keeps those experiments runnable with current production
+constants.
+
+Research modules are not imported by `grokcam.cli.process_reel`, do not participate
+in reel processing, and do not change the frozen calibration. They are reference
+material for future algorithm investigations, not alternate production commands.
+
+## 19. Quick-reference workflow
+
+1. Mount and verify the reel storage:
+
+   ```bash
+   mount | grep GrokCam
+   df -h /mnt/GrokCam
+   ```
+
+2. Locate and sample the source sequence:
+
+   ```bash
+   find /mnt/GrokCam/projects/RAW_Test/raw -maxdepth 1 -type f -name 'frame_*.dng' \
+     | sort | head
+   ```
+
+3. Verify the frozen calibration:
+
+   ```bash
+   sha256sum calibrations/darktable_match_v1.json
+   ```
+
+4. Run the complete command with `--plan-only` and review every planned range.
+
+5. Run a short representative range into a separate test output; inspect framing,
+   orientation, color, and manifest detector decisions.
+
+6. Start the normal reel command, preferably capturing stdout/stderr with
+   `set -o pipefail` and `tee`.
+
+7. If interrupted, confirm no process is active and rerun the exact same command.
+
+8. Confirm successful finalization:
+   - console says `Complete and verified`;
+   - `final.verified` is true in `processing_manifest.json`;
+   - the final `RAW_review_FIRST_LAST_FPSfps.mp4` exists;
+   - component segments have been removed.
+
+9. Retain the final movie and manifest with the immutable DNG archive. Review
+   segment interpolation counts and all frame records with `accepted: false`.
+
+10. Do not rerun an already finalized output directory unless intentional
+    reprocessing is desired; use a new output directory for further proofs.

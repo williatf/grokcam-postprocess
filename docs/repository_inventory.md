@@ -56,7 +56,8 @@ calibration dependency.
 - `docs/calibration.md`: frozen inference and offline recalibration.
 - `docs/processing_history.md`: concise architectural and algorithm history.
 - `docs/*_findings.md`: retained research conclusions.
-- `docs/GrokCam_RAW_postprocessing_guide.md`: clearly labelled historical notes.
+- `docs/GrokCam_RAW_postprocessing_guide.md`: comprehensive production-v1 user
+  and technical operations guide.
 
 ## Generated / ignored
 
