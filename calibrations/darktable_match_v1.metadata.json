@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "calibration_id": "grokcam-darktable-match-v1",
+  "adoption_status": "golden_production",
+  "created": "2026-08-20T15:57:52+00:00",
+  "artifact": "darktable_match_v1.json",
+  "artifact_sha256": "d5a4526b6b5e38fd9d7b37876b0ec39cb37a370d066419433db38f978cb3dc96",
+  "camera_sensor_assumptions": {
+    "raw_dimensions": [2028, 1520],
+    "processed_dimensions": [2028, 1520],
+    "color_description": "RGBG",
+    "cfa_pattern": [[2, 3], [1, 0]],
+    "representative_camera_whitebalance_rgbg": [2.5109000205993652, 1.0, 1.656599998474121, 0.0]
+  },
+  "tools": {
+    "python": "3.14.4",
+    "numpy": "2.5.2",
+    "rawpy": "0.27.0",
+    "libraw": "0.22.1",
+    "darktable": "5.4.1",
+    "sprocket_white_exiftool": "13.50"
+  },
+  "training_frames": [120, 121, 122, 123, 1000, 1001, 1002, 1003, 1400, 1401, 1402, 1403, 1598, 1599, 1600, 1601, 1798, 1799, 1800, 1801, 2198, 2199, 2200, 2201],
+  "holdout_frames": [2798, 2799, 2800, 2801, 3398, 3399, 3400, 3401],
+  "white_balance_source": {
+    "report": "/mnt/GrokCam/projects/RAW_Test/outputs/sprocket-white-poc/poc-report.json",
+    "report_sha256": "9b2e40a4dea76ee41b8949ce7a761c00694066c10d0c42edcd485ff50c72de82",
+    "source_frames": [1400, 1401, 1402, 1403, 1598, 1599, 1600, 1601, 1798, 1799, 1800, 1801, 2198, 2199, 2200, 2201, 2798, 2799, 2800, 2801, 3398, 3399, 3400, 3401]
+  },
+  "validation": {
+    "metric": "mean absolute RGB error on registered display-referred crops",
+    "details": "Stored per frame in the calibration artifact metrics array",
+    "production_regression_frames": [120, 121, 122, 123],
+    "production_movie_sha256": "bc13e671530a3483dce0f510c1420ad32cf481c942956a8221197297541c5f76"
+  },
+  "notes": "Exact byte-for-byte copy of the adopted POC report. Future candidates must use a new calibration ID and require explicit review before changing production."
+}

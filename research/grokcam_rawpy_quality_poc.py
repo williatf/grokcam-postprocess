@@ -21,7 +21,7 @@ except ImportError as exc:
         "/home/todd/telecine/.venv/bin/python"
     ) from exc
 
-from grokcam_raw_production import PRESETS, detect_anchor
+from research._legacy_geometry import PRESETS, detect_anchor
 
 VERSION = "0.1.0"
 GROUPS = [

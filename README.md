@@ -1,11 +1,9 @@
 # GrokCam production post-processing
 
-This repository contains one recommended processing path for GrokCam archival
-DNG captures. It preserves the approved behavior of
-`grokcam_raw_production_darktable_matched`: learned Darktable-matched RAW
-development, physical sprocket registration, the calibrated loose crop,
-orientation correction, restrained temporal normalization, and verified H.264
-output.
+This repository contains one production processing path for GrokCam archival
+DNG captures. It preserves the approved learned Darktable-matched RAW
+development, physical sprocket registration, calibrated loose crop, orientation
+correction, restrained temporal normalization, and verified H.264 output.
 
 The DNG source directory is read-only input. Disposable intermediates belong in
 `work/`; retained movies and manifests belong under the project's `outputs/`
@@ -27,6 +25,12 @@ that anchor plus the calibrated crop offsets. An interpolated anchor is a
 registration fallback after a missing or rejected measurement; it is not a
 second image detector.
 
+The complete batch lifecycle lives in the production package. `grokcam.batch`
+owns selection, locking, restart planning, staging, stage order, cleanup, and
+finalization; `grokcam.encoding` owns FFmpeg and verification; and
+`grokcam.manifest` owns atomic processing state. Historical scripts are not
+runtime dependencies.
+
 ## Run a reel
 
 Use the processing virtual environment already provisioned for this project:
@@ -46,9 +50,7 @@ First inspect a plan without processing:
 ```
 
 Useful options are `--first`, `--last`, `--batch-frames`, `--jobs`, `--fps`,
-`--minimum-free-gib`, `--calibration`, and `--match-report`. The historical
-`scripts/grokcam_raw_production_darktable_matched.py` command remains a
-compatibility shim.
+`--minimum-free-gib`, `--calibration`, and `--match-report`.
 
 ## Calibration
 
@@ -56,8 +58,12 @@ Golden values live in `grokcam/config.py`. They include the sprocket search
 window and geometry, outlier limits, crop offsets/dimensions, normalization
 bounds, and match-report path. `--calibration FILE.json` may override named
 values; unknown keys fail clearly. Camera/color matching coefficients and LUTs
-remain in the externally retained match report and are validated before any
-frame is processed.
+live in the versioned golden report and are validated before any frame is
+processed.
+
+The golden report is now version-controlled under `calibrations/`. Offline
+relearning and candidate validation are documented in
+[`docs/calibration.md`](docs/calibration.md); production never retrains itself.
 
 ## Output, resume, and failures
 

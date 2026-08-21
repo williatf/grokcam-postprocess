@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-from grokcam_raw_production import PRESETS, detect_anchor, subpixel_crop
+from research._legacy_geometry import PRESETS, detect_anchor, subpixel_crop
 
 VERSION = "0.1.0"
 GROUPS = [

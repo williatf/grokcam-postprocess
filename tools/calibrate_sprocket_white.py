@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure empty sprocket illumination in the packed linear DNG CFA mosaic."""
+"""Derive a candidate RAW white-balance correction from empty sprocket illumination."""
 from __future__ import annotations
 import argparse, csv, hashlib, json, os, platform, shutil, subprocess
 from datetime import datetime, timezone

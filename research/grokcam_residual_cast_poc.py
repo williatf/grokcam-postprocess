@@ -6,8 +6,8 @@ from datetime import datetime,timezone
 from pathlib import Path
 import numpy as np
 from PIL import Image,ImageDraw
-from grokcam_sprocket_white_poc import raw12,demosaic
-from grokcam_raw_production import PRESETS,subpixel_crop
+from tools.calibrate_sprocket_white import raw12,demosaic
+from research._legacy_geometry import PRESETS,subpixel_crop
 
 FRAMES=[1400,1598,1798,2198,2798,3398]; FIXED=np.array([1.06984,1,1.09921])
 SRGB2XYZ=np.array([[.4124564,.3575761,.1804375],[.2126729,.7151522,.072175],[.0193339,.119192,.9503041]])

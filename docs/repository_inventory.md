@@ -1,56 +1,71 @@
 # Repository inventory
 
-Inventory date: 2026-08-21. The dependency analysis preceded consolidation and
-no source DNG, calibration report, or retained output was changed.
+Post-cleanup inventory date: 2026-08-21.
 
-## Active production
+## Production
 
-- `grokcam/`: calibrated stage implementations, models, composition, resume and
-  regression utilities, and canonical CLI.
-- `scripts/grokcam_raw_production_with_timings.py`: proven batch lifecycle used
-  by `grokcam.pipeline` in this compatibility-preserving release (selection,
-  locking, normalization, encoding, verification, cleanup, and manifest).
-- `scripts/grokcam_raw_production_darktable_matched.py`: compatibility shim.
-- `pyproject.toml`, `README.md`: packaging and production operation.
+- `grokcam/batch.py`: disk-bounded frame selection, restart planning, staging,
+  stage orchestration, cleanup, and finalization.
+- `grokcam/raw_development.py`: frozen Darktable-matched rawpy inference.
+- `grokcam/sprocket_detection.py`, `registration.py`, and
+  `image_processing.py`: physical film detection, geometry, and registered crop.
+- `grokcam/normalization.py`: approved restrained reel normalization.
+- `grokcam/encoding.py`: FFmpeg encoding, concatenation, verification, and hashes.
+- `grokcam/manifest.py`, `models.py`, `resume.py`, and `timing.py`: production
+  records and lifecycle support.
+- `grokcam/pipeline.py` and `grokcam/cli/process_reel.py`: canonical composition
+  and sole production entry point.
 
-## Tests and calibration
+No production module imports a historical script or offline calibration fitter.
 
-- `tests/test_production.py`: calibration, detector, fallback interpolation,
-  crop geometry, transform, resume, and manifest regression tests.
-- External `rawpy-darktable-match-poc/poc-report.json`: authoritative learned
-  color calibration. It is retained outside the repository outputs and is not
-  generated during production.
-- `work/matched-timed-proof/`: disposable four-frame golden proof from the
-  actual timed/matched execution path; ignored by Git.
+## Calibration tooling
 
-## Documentation and research retained
+- `calibrations/darktable_match_v1.json`: exact frozen production artifact.
+- `calibrations/darktable_match_v1.metadata.json`: identity, provenance, source
+  frames, software versions, and validation record.
+- `grokcam/calibration/match_model.py`: permanent fitting mathematics.
+- `tools/calibrate_sprocket_white.py`: candidate RGBG correction derivation.
+- `tools/calibrate_darktable_match.py`: paired reference generation and candidate
+  model fitting.
+- `tools/compare_darktable_calibrations.py`: candidate/reference comparison.
+- `docs/calibration.md`: complete offline workflow and adoption boundary.
 
-- `docs/GrokCam_RAW_postprocessing_guide.md`: detailed historical operations
-  guide (some commands predate the canonical CLI).
-- `docs/color_poc_findings.md`, `docs/residual_cast_poc_findings.md`, and
-  `docs/sprocket_white_poc_findings.md`: concise experiment conclusions.
-- `docs/processing_history.md`: why the selected algorithms survived.
+Calibration tools write candidate artifacts only. Production reads the frozen
+artifact and never retrains or approves a candidate.
 
-## Superseded or experimental candidates (retained pending exact deletion approval)
+## Research
 
-- `scripts/grokcam_raw_production.py`: original Darktable batch runner.
-- `scripts/grokcam_color_poc.py`, `grokcam_rawpy_darktable_match_poc.py`,
-  `grokcam_rawpy_quality_poc.py`, `grokcam_residual_cast_poc.py`, and
-  `grokcam_sprocket_white_poc.py`: reproducible research scripts whose findings
-  are already documented.
-- The unused adaptive renderer and old Darktable development functions within
-  `scripts/grokcam_raw_production_with_timings.py`: not on the composed
-  production path, retained because the proven batch runner remains a staged
-  dependency in this release.
+- `research/grokcam_rawpy_quality_poc.py`: renderer/demosaic investigation.
+- `research/grokcam_color_poc.py`: downstream normalization investigation.
+- `research/grokcam_residual_cast_poc.py`: restoration-grade investigation.
+- `research/_legacy_geometry.py`: production-equivalent geometry adapter shared
+  by those retained scripts.
 
-## Generated artifacts
+Research is retained for future investigation and is not a production or
+calibration dependency.
 
-- Everything under `work/`, Python bytecode, `.DS_Store`, logs, images, videos,
-  locks, and local Darktable databases is generated or machine-local and ignored.
-- The two tracked root `.DS_Store` resource-fork files predate this consolidation.
-  They are deletion candidates but were not removed without exact approval.
+## Tests
 
-## Unknown
+- `tests/test_production.py`: calibration identity/loading, detector and
+  interpolation behavior, crop geometry, resume/segment planning, manifests,
+  finalization, transform behavior, and golden regression snapshots.
 
-None among tracked files. Generated `work/` subtrees are purpose-labelled and
-disposable, but remain untouched under the workspace retention rule.
+## Documentation
+
+- `README.md`: current production workflow and canonical command.
+- `docs/calibration.md`: frozen inference and offline recalibration.
+- `docs/processing_history.md`: concise architectural and algorithm history.
+- `docs/*_findings.md`: retained research conclusions.
+- `docs/GrokCam_RAW_postprocessing_guide.md`: clearly labelled historical notes.
+
+## Generated / ignored
+
+- `work/`: disposable proof, calibration-audit, and processing intermediates.
+- Python/test caches, logs, images, videos, temporary manifests, locks, and local
+  Darktable databases are ignored.
+- Archival DNGs and retained project outputs live outside the repository and are
+  never cleanup targets.
+
+The repository has no remaining tracked cleanup candidates or uncertain files.
+No retained manifest currently contains a real missed/rejected/interpolated
+sprocket case, so that non-happy path uses a small synthetic test fixture.

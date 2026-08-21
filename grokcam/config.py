@@ -6,6 +6,8 @@ import json
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
+DEFAULT_MATCH_REPORT = Path(__file__).resolve().parents[1] / "calibrations" / "darktable_match_v1.json"
+
 
 @dataclass(frozen=True)
 class DetectorCalibration:
@@ -35,7 +37,7 @@ class CropCalibration:
 
 @dataclass(frozen=True)
 class MatchCalibration:
-    report: Path = Path("/mnt/GrokCam/projects/RAW_Test/outputs/rawpy-darktable-match-poc/poc-report.json")
+    report: Path = DEFAULT_MATCH_REPORT
 
 
 @dataclass(frozen=True)

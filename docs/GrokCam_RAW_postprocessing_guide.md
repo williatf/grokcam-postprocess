@@ -1,8 +1,12 @@
-# GrokCam Archival RAW Post-Processing Guide
+# Historical GrokCam RAW workflow notes
+
+> This document records the pre-consolidation Darktable workflow. Its referenced
+> standalone production script has been removed. Use the repository `README.md`
+> and `python -m grokcam.cli.process_reel` for current production processing.
 
 This guide documents the GrokCam DNG workflow developed for Todd's Regular 8 mm film captures. It is intended to be sufficient to repeat the work later without relying on memory or this conversation.
 
-[Download the production processing script](grokcam_raw_production.py)
+Historical production script (removed): `grokcam_raw_production.py`.
 
 ## The short version
 
