@@ -9,6 +9,11 @@ The DNG source directory is read-only input. Disposable intermediates belong in
 `work/`; retained movies and manifests belong under the project's `outputs/`
 directory.
 
+New processing manifests identify the consolidated application as
+`grokcam_postprocess`. The earlier
+`grokcam_raw_production_darktable_matched` identifier remains historical
+provenance only.
+
 ## Processing flow
 
 ```text

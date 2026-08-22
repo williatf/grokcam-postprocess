@@ -16,6 +16,8 @@ from . import __version__
 from .config import ProductionCalibration
 from .encoding import tool_version
 
+PIPELINE_ID = "grokcam_postprocess"
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -42,7 +44,7 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
     match_bytes = match_path.read_bytes()
     match_report = json.loads(match_bytes)
     manifest = {
-        "pipeline": "grokcam_raw_production_darktable_matched", "version": __version__,
+        "pipeline": PIPELINE_ID, "version": __version__,
         "created": utc_now(), "raw_dir": str(raw_dir), "source_policy": "read_only",
         "frame_range": [numbers[0], numbers[-1]], "frame_count": len(numbers),
         "fps": fps, "batch_frames": batch_frames,

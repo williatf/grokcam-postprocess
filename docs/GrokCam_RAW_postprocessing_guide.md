@@ -627,6 +627,11 @@ and final verification record—not a replacement for the source DNGs.
 | `final` | Final movie path, bytes, SHA-256, verification, and completion time. |
 | `retention` | What the successful run retained and removed. |
 
+The canonical `pipeline` value is `grokcam_postprocess`. Manifests from the
+pre-consolidation production path may contain the historical value
+`grokcam_raw_production_darktable_matched`; that value is no longer emitted by
+new output directories.
+
 ### Segment fields
 
 Each segment records:

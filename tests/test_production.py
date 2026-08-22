@@ -13,7 +13,7 @@ from PIL import Image
 from grokcam.config import (DEFAULT_MATCH_REPORT, DetectorCalibration,
                             VerticalStabilizationCalibration, load_calibration)
 from grokcam.batch import RunOptions, finalize_if_complete, remaining_batches
-from grokcam.manifest import load_or_create
+from grokcam.manifest import PIPELINE_ID, load_or_create
 from grokcam.models import SprocketDetection
 from grokcam.raw_development import apply_match, load_match_report
 from grokcam.registration import crop_for_detection
@@ -166,6 +166,8 @@ class ProductionTests(unittest.TestCase):
                 manifest = load_or_create(path, Path("/archive/raw"), [10, 11], 16, 2,
                                           load_calibration(), Path("ffmpeg"))
             self.assertEqual(manifest["source_policy"], "read_only")
+            self.assertEqual(PIPELINE_ID, "grokcam_postprocess")
+            self.assertEqual(manifest["pipeline"], PIPELINE_ID)
             self.assertEqual(manifest["frame_range"], [10, 11])
             self.assertEqual(manifest["crop"]["width"], 1133)
             self.assertEqual(manifest["raw_development_calibration"]["sha256"],
