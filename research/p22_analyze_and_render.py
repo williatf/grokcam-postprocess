@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Analyze P22 and render P15-first/refined-P07 fallback diagnostics."""
+from __future__ import annotations
+import argparse,csv,json,shutil,sys
+from collections import Counter
+from pathlib import Path
+import numpy as np
+from PIL import Image,ImageDraw
+ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
+from grokcam.config import load_calibration
+from grokcam.encoding import encode_segment,file_sha256,run_command,verify_video
+from grokcam.image_processing import registered_frame
+from grokcam.models import CropGeometry
+from grokcam.normalization import normalize_frames
+from grokcam.raw_development import DarktableMatchedDeveloper
+LOWER_TOP_TO_CROP_TOP=-673.5297914597816
+
+def metrics(errors):
+ v=np.asarray(list(errors),float);a=np.abs(v);m=float(np.median(v));return {'n':len(v),'median_bias_px':m,'mad_px':float(np.median(np.abs(v-m))),'median_absolute_error_px':float(np.median(a)),'p90_absolute_error_px':float(np.percentile(a,90)),'p95_absolute_error_px':float(np.percentile(a,95)),'max_absolute_error_px':float(max(a)),**{f'over_{q}_px':int(sum(a>q)) for q in (1,2,3,5)}}
+
+def main():
+ p=argparse.ArgumentParser();p.add_argument('--p22-valid',type=Path,required=True);p.add_argument('--p22-missing',type=Path,required=True);p.add_argument('--p21-measurements',type=Path,required=True);p.add_argument('--p15',type=Path,required=True);p.add_argument('--config',type=Path,required=True);p.add_argument('--raw-dir',type=Path,required=True);p.add_argument('--p21-movie',type=Path,required=True);p.add_argument('--output-dir',type=Path,required=True);p.add_argument('--render',action='store_true');a=p.parse_args()
+ cfg=json.loads(a.config.read_text());valid={int(r['frame']):r for r in csv.DictReader(a.p22_valid.open())};missing={int(r['frame']):r for r in csv.DictReader(a.p22_missing.open())};p21={int(r['frame']):r for r in csv.DictReader(a.p21_measurements.open())};truth={int(r['frame']):float(r['lower_top_y']) for r in csv.DictReader(a.p15.open()) if r['lower_top_valid']=='True'};new_offset=cfg['p22_model_to_p15_lower_top_offset_px'];old_offset=3.944868878638772;rows=[]
+ for n in range(2000,2351):
+  source='P15' if n in truth else 'P22';q=valid.get(n) or missing[n];frozen=float(q['model_lower_top_y']);refined=float(q['refined_model_lower_top_y']);register=truth.get(n,refined+new_offset);rows.append({'frame':n,'register_source':source,'register_y':register,'p15_lower_top_y':truth.get(n),'frozen_p07_model_lower_top_y':frozen,'refined_p07_model_lower_top_y':refined,'refined_shift_y':float(q['refined_shift_y']),'p21_calibrated_error_px':None if n not in truth else frozen+old_offset-truth[n],'p22_calibrated_error_px':None if n not in truth else refined+new_offset-truth[n],'p22_calibrated_fallback_y':refined+new_offset,'p07_anchor_x':float(p21[n]['p07_anchor_x']),'local_score':float(q['local_score']),'local_score_margin_1px':float(q['local_score_margin_1px']),'local_score_range':float(q['score_range']),'maximum_tie_count':int(q['maximum_tie_count']),'search_boundary_hit':q['search_boundary_hit']=='True','p07_joint_score':float(q['joint_score']),'p07_competitor_margin':float(q['competitor_margin']),'p07_supported':int(q['supported']),'p07_contradicted':int(q['contradicted']),'historical_source':q['historical_source']})
+ for prev,r in zip(rows,rows[1:]):r['register_jump_from_previous_px']=r['register_y']-prev['register_y'];r['source_transition_from_previous']=r['register_source']!=prev['register_source']
+ rows[0]['register_jump_from_previous_px']=None;rows[0]['source_transition_from_previous']=False;a.output_dir.mkdir(parents=True,exist_ok=True)
+ with (a.output_dir/'measurements.csv').open('w',newline='') as h:w=csv.DictWriter(h,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
+ calibration=[r for r in rows if r['p15_lower_top_y'] is not None and r['frame']%2==0];held=[r for r in rows if r['p15_lower_top_y'] is not None and r['frame']%2];overlap=calibration+held;fallback=[r for r in rows if r['register_source']=='P22'];shifts=np.array([r['refined_shift_y'] for r in overlap]);fshifts=np.array([r['refined_shift_y'] for r in fallback]);trans=[r for r in rows if r['source_transition_from_previous']];j=np.abs([r['register_jump_from_previous_px'] for r in trans]);poor=[r for r in fallback if r['local_score_margin_1px']<=.01]
+ summary={'comparison':{'P21_frozen_P07':{'overall':metrics(r['p21_calibrated_error_px'] for r in overlap),'calibration':metrics(r['p21_calibrated_error_px'] for r in calibration),'held_out':metrics(r['p21_calibrated_error_px'] for r in held)},'P22_refined_P07':{'overall':metrics(r['p22_calibrated_error_px'] for r in overlap),'calibration':metrics(r['p22_calibrated_error_px'] for r in calibration),'held_out':metrics(r['p22_calibrated_error_px'] for r in held)}},'config':cfg,'overlap_shift':{'median':float(np.median(shifts)),'mad':float(np.median(abs(shifts-np.median(shifts)))),'min':float(min(shifts)),'max':float(max(shifts)),'histogram':{str(k):v for k,v in sorted(Counter(shifts).items())},'boundary_hits':sum(r['search_boundary_hit'] for r in overlap),'poorly_defined_margin_le_0_01':sum(r['local_score_margin_1px']<=.01 for r in overlap)},'fallback':{'completion':len(fallback),'expected':67,'shift_median':float(np.median(fshifts)),'shift_mad':float(np.median(abs(fshifts-np.median(fshifts)))),'shift_min':float(min(fshifts)),'shift_max':float(max(fshifts)),'shift_histogram':{str(k):v for k,v in sorted(Counter(fshifts).items())},'boundary_hits':sum(r['search_boundary_hit'] for r in fallback),'ties':dict(Counter(r['maximum_tie_count'] for r in fallback)),'poorly_defined_frames':[{'frame':r['frame'],'shift':r['refined_shift_y'],'margin_1px':r['local_score_margin_1px'],'score_range':r['local_score_range']} for r in poor],'frame_2293':next(r for r in fallback if r['frame']==2293),'accuracy_claimed':False},'known_and_controls':{str(r['frame']):r for r in rows if r['frame'] in {2003,2082,2093,2097,2144,2240,2242,2161,2162,2146,2147}},'transitions':{'count':len(trans),'median_absolute_jump_px':float(np.median(j)),'p95_absolute_jump_px':float(np.percentile(j,95)),'max_absolute_jump_px':float(max(j))},'movies':{}}
+ if a.render:
+  stage=a.output_dir/'staging';reg=stage/'registered';norm=stage/'normalized';reg.mkdir(parents=True,exist_ok=True);cal=load_calibration();dev=DarktableMatchedDeveloper(cal.match.report);tif=stage/'developed.tif'
+  for i,r in enumerate(rows,1):
+   n=r['frame'];dev.develop(a.raw_dir/f"frame_{n:06d}.dng",tif)
+   with Image.open(tif) as image:out=registered_frame(image,CropGeometry(r['p07_anchor_x']+159,r['register_y']+LOWER_TOP_TO_CROP_TOP,cal.crop.width,cal.crop.height),cal.contrast)
+   d=ImageDraw.Draw(out);d.rectangle((0,0,290,32),fill='black');d.text((8,8),f"{n}  Y={r['register_source']}",fill=(255,255,255));out.save(reg/f"frame_{n:06d}.jpg",quality=95,subsampling=0)
+   if i==1 or i%50==0 or i==len(rows):print(f"P22 render {i}/{len(rows)}",flush=True)
+  _,target=normalize_frames(sorted(reg.glob('frame_*.jpg')),norm,None);movie=a.output_dir/'Reel_46335_002000_002350_p22_p15_first_refined_p07_16fps.mp4';tmp=movie.with_suffix('.tmp.mp4');encode_segment(Path('/usr/bin/ffmpeg'),norm,tmp,2000,351,16);verification=verify_video(Path('/usr/bin/ffmpeg'),Path('/usr/bin/ffprobe'),tmp,351);tmp.replace(movie);summary['movies']['p22']={'path':str(movie.resolve()),'sha256':file_sha256(movie),'bytes':movie.stat().st_size,'normalization_target_luma':target,'verification':verification}
+  compare=a.output_dir/'Reel_46335_002000_002350_p21_vs_p22_side_by_side_16fps.mp4';tmpc=compare.with_suffix('.tmp.mp4');run_command(['/usr/bin/ffmpeg','-y','-hide_banner','-loglevel','error','-i',str(a.p21_movie),'-i',str(movie),'-filter_complex','hstack=inputs=2','-c:v','libx264','-threads','1','-preset','fast','-crf','17','-pix_fmt','yuv420p',str(tmpc)]);cv=verify_video(Path('/usr/bin/ffmpeg'),Path('/usr/bin/ffprobe'),tmpc,351);tmpc.replace(compare);summary['movies']['side_by_side']={'path':str(compare.resolve()),'sha256':file_sha256(compare),'bytes':compare.stat().st_size,'left':'P21','right':'P22','verification':cv};shutil.rmtree(stage)
+ (a.output_dir/'summary.json').write_text(json.dumps(summary,indent=2)+'\n');print(json.dumps(summary,indent=2))
+if __name__=='__main__':main()

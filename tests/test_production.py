@@ -12,7 +12,8 @@ from PIL import Image
 
 from grokcam.config import (DEFAULT_MATCH_REPORT, DetectorCalibration,
                             VerticalStabilizationCalibration, load_calibration)
-from grokcam.batch import RunOptions, finalize_if_complete, remaining_batches
+from grokcam.batch import (RunOptions, finalize_if_complete, preserve_excluded_tiff,
+                           remaining_batches)
 from grokcam.manifest import PIPELINE_ID, load_or_create
 from grokcam.models import SprocketDetection
 from grokcam.raw_development import apply_match, load_match_report
@@ -21,6 +22,9 @@ from grokcam.regression import compare_manifests
 from grokcam.regression import frame_records
 from grokcam.resume import contiguous_batches
 from grokcam.sprocket_detection import detect, validate_batch
+from grokcam.sprocket_detection import validate_batch_with_physical
+from grokcam.physical_sprocket import (DETECTOR_MODE, FROZEN_CONFIG,
+                                      PhysicalPairResult, fit_pair)
 from grokcam.vertical_stabilization import (FrameMeasurements, ResidualMeasurement,
                                             measure_frame, resolve_batch)
 
@@ -139,6 +143,110 @@ class ProductionTests(unittest.TestCase):
         self.assertTrue(result[1].interpolated)
         self.assertFalse(result[1].detected)
 
+    def test_physical_mode_does_not_invoke_p07_on_clean_frames(self):
+        values = [SprocketDetection(300, 700, 1), SprocketDetection(301, 701, 1)]
+        with patch("grokcam.physical_sprocket.detect_fallback") as physical:
+            result, details = validate_batch_with_physical(
+                lambda _index: Image.new("RGB", (2028, 1520)), values, DetectorCalibration())
+        physical.assert_not_called()
+        self.assertEqual([d.detector for d in result], ["primary", "primary"])
+        self.assertTrue(all(d["final_registration_source"] == "primary" for d in details))
+
+    def test_p07_same_frame_result_precedes_interpolation(self):
+        values = [SprocketDetection(300, 700, 1), None, SprocketDetection(302, 704, 1)]
+        recovered = PhysicalPairResult(True, "joint_pair_recovery", 410.0, 820.0,
+                                       {"classification": "joint_pair_recovery"})
+        with patch("grokcam.physical_sprocket.detect_fallback", return_value=recovered):
+            result, details = validate_batch_with_physical(
+                lambda _index: Image.new("RGB", (2028, 1520)), values, DetectorCalibration())
+        self.assertEqual((result[1].cx, result[1].cy), (410.0, 820.0))
+        self.assertFalse(result[1].interpolated)
+        self.assertEqual(result[1].detector, "physical_p07")
+        self.assertTrue(details[1]["p07_accepted"])
+
+    def test_fallback_preserves_rejected_primary_and_capture_roi_provenance(self):
+        values = [SprocketDetection(300, 700, 1), SprocketDetection(500, 900, 9),
+                  SprocketDetection(302, 704, 1)]
+        recovered = PhysicalPairResult(True, "joint_pair_recovery", 410.0, 820.0,
+            {"classification": "joint_pair_recovery", "stage": "p07",
+             "capture_roi_boxes": [[100, 200, 300, 250]], "independent_holes": [None, None]})
+        with patch("grokcam.physical_sprocket.detect_fallback", return_value=recovered):
+            _result, details = validate_batch_with_physical(
+                lambda _index: Image.new("RGB", (2028, 1520)), values,
+                DetectorCalibration(), [{}, {"capture": True}, {}])
+        self.assertEqual(details[1]["primary_rejected_anchor"], {"x": 500, "y": 900, "score": 9})
+        self.assertEqual(details[1]["physical_diagnostics"]["capture_roi_boxes"],
+                         [[100, 200, 300, 250]])
+
+    def test_p07_ambiguity_is_excluded_not_interpolated(self):
+        values = [SprocketDetection(300, 700, 1), None, SprocketDetection(302, 704, 1)]
+        rejected = PhysicalPairResult(False, "ambiguous_competing_pair_positions", None, None,
+                                      {"classification": "ambiguous_competing_pair_positions"})
+        with patch("grokcam.physical_sprocket.detect_fallback", return_value=rejected):
+            result, details = validate_batch_with_physical(
+                lambda _index: Image.new("RGB", (2028, 1520)), values, DetectorCalibration())
+        self.assertIsNone(result[1])
+        self.assertIsNone(details[1]["final_registration_source"])
+        self.assertEqual(details[1]["output_disposition"], "excluded")
+        self.assertEqual(details[1]["exclusion_reason"],
+                         "ambiguous_competing_pair_positions")
+
+    def test_p07_excludes_unresolved_batch_edge(self):
+        values = [None, SprocketDetection(300, 700, 1)]
+        rejected = PhysicalPairResult(False, "insufficient_joint_support", None, None, {})
+        with patch("grokcam.physical_sprocket.detect_fallback", return_value=rejected):
+            result, details = validate_batch_with_physical(
+                lambda _index: Image.new("RGB", (2028, 1520)), values,
+                DetectorCalibration())
+        self.assertIsNone(result[0])
+        self.assertEqual(details[0]["output_disposition"], "excluded")
+
+    def test_p07_excludes_multi_frame_run_and_continues(self):
+        values = [SprocketDetection(300, 700, 1), None, None,
+                  SprocketDetection(301, 701, 1)]
+        rejected = PhysicalPairResult(False, "insufficient_joint_support", None, None, {})
+        with patch("grokcam.physical_sprocket.detect_fallback", return_value=rejected):
+            result, details = validate_batch_with_physical(
+                lambda _index: Image.new("RGB", (2028, 1520)), values,
+                DetectorCalibration())
+        self.assertEqual([item is None for item in result], [False, True, True, False])
+        self.assertEqual([details[i]["output_disposition"] for i in (1, 2)],
+                         ["excluded", "excluded"])
+        self.assertEqual(result[3].cx, 301)
+
+    def test_excluded_debug_tiff_is_exact_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "frame_002606.tif"
+            source.write_bytes(b"developed-tiff-evidence")
+            destination = preserve_excluded_tiff(source, root / "output")
+            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            self.assertEqual(destination.name, "frame_002606.tif")
+
+    def test_p07_anchor_flows_into_residual_coordinate_then_one_final_crop(self):
+        p07 = SprocketDetection(410.0, 820.0, None, detector="physical_p07")
+        primary_crop = crop_for_detection(p07, load_calibration().crop)
+        config = VerticalStabilizationCalibration(enabled=True)
+        top = ResidualMeasurement(config.top_reference_y - 12.5, 1.0, .1, .2, 0.0)
+        bottom = ResidualMeasurement(config.bottom_reference_y - 12.5, 1.0, .1, .2, .2)
+        measured = FrameMeasurements(top, None, top, "normal", bottom)
+        resolved = resolve_batch([measured], [primary_crop], [1520], config)[0]
+        self.assertEqual((primary_crop.left, primary_crop.top), (569.0, 407.0))
+        self.assertEqual(resolved.source, "measured")
+        self.assertEqual(resolved.corrected_crop.top, 419.5)
+        source = Image.new("RGB", (2028, 1520), "white")
+        with patch("PIL.Image.Image.transform", autospec=True,
+                   side_effect=Image.Image.transform) as sample:
+            from grokcam.image_processing import registered_frame
+            output = registered_frame(source, resolved.corrected_crop, 1.0)
+        self.assertEqual(output.size, (1133, 900))
+        self.assertEqual(sample.call_count, 1)
+
+    def test_production_p07_is_exact_to_cached_oracle_on_same_input(self):
+        from research.p07_exact_cached_candidate_poc import fit_pair_cached
+        image = np.random.default_rng(7).integers(0, 256, (1520, 2028, 3), dtype=np.uint8)
+        oracle = fit_pair_cached(image, [], [], None, FROZEN_CONFIG)
+        self.assertEqual(fit_pair(image), oracle)
+
     def test_resume_batches_do_not_bridge_gaps(self):
         paths = [Path(f"frame_{n:06d}.dng") for n in (1, 2, 4, 5, 6)]
         number = lambda p: int(p.stem.rsplit("_", 1)[1])
@@ -174,6 +282,31 @@ class ProductionTests(unittest.TestCase):
                              "d5a4526b6b5e38fd9d7b37876b0ec39cb37a370d066419433db38f978cb3dc96")
             self.assertTrue(path.exists())
 
+    def test_manifest_records_physical_mode_and_rejects_mixed_resume(self):
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "processing_manifest.json"
+            physical = replace(load_calibration(), sprocket_detector_mode=DETECTOR_MODE)
+            with patch("grokcam.manifest.tool_version", return_value="ffmpeg test"):
+                manifest = load_or_create(path, Path("/archive/raw"), [1], 16, 1,
+                                          physical, Path("ffmpeg"))
+                self.assertEqual(manifest["sprocket_registration"]["mode"], DETECTOR_MODE)
+                with self.assertRaisesRegex(RuntimeError, "different sprocket detector"):
+                    load_or_create(path, Path("/archive/raw"), [1], 16, 1,
+                                   load_calibration(), Path("ffmpeg"))
+                manifest["sprocket_registration"]["production_module_sha256"] = "wrong"
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "production module hash"):
+                    load_or_create(path, Path("/archive/raw"), [1], 16, 1,
+                                   physical, Path("ffmpeg"))
+                manifest["sprocket_registration"]["production_module_sha256"] = \
+                    __import__("grokcam.manifest", fromlist=["physical_module_sha256"]).physical_module_sha256()
+                manifest["sprocket_registration"]["failure_policy"] = "legacy_interpolation"
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "failure policy"):
+                    load_or_create(path, Path("/archive/raw"), [1], 16, 1,
+                                   physical, Path("ffmpeg"))
+
     def test_finalization_records_verified_movie_and_removes_segments(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -196,6 +329,36 @@ class ProductionTests(unittest.TestCase):
             self.assertTrue(manifest["final"]["verified"])
             self.assertFalse(video.exists())
             self.assertTrue(manifest_path.exists())
+
+    def test_finalization_records_source_to_encoded_mapping_and_exclusion_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); segments = root / "segments"; segments.mkdir()
+            video = segments / "frames_000001_000004_16fps.mp4"; video.write_bytes(b"segment")
+            debug = root / "debug" / "excluded_frames" / "frame_000002.tif"
+            records = [
+                {"frame": 1, "output_disposition": "included", "encoded_output_frame": 1},
+                {"frame": 2, "output_disposition": "excluded", "encoded_output_frame": None,
+                 "exclusion_reason": "insufficient_joint_support", "debug_developed_image": str(debug)},
+                {"frame": 3, "output_disposition": "excluded", "encoded_output_frame": None,
+                 "exclusion_reason": "insufficient_joint_support", "debug_developed_image": str(debug)},
+                {"frame": 4, "output_disposition": "included", "encoded_output_frame": 2},
+            ]
+            manifest = {"segments": [{"first": 1, "last": 4, "frames": 2,
+                                       "video": str(video), "verified": True,
+                                       "frame_records": records}]}
+            dngs = [root / f"frame_{n:06d}.dng" for n in range(1, 5)]
+            options = RunOptions(root, root, fps=16)
+            def fake_concat(_ffmpeg, _concat, _paths, temporary): temporary.write_bytes(b"joined")
+            with patch("grokcam.batch.concatenate_segments", side_effect=fake_concat), \
+                 patch("grokcam.batch.verify_video", return_value={"streams": [{"nb_frames": "2"}]}):
+                finalize_if_complete(options, dngs, manifest, root / "manifest.json", segments)
+            self.assertEqual(manifest["frame_mapping"], {
+                "source_frames": 4, "included_frames": 2, "excluded_frames": 2,
+                "encoded_frames": 2, "invariants_valid": True})
+            run = manifest["exclusion_runs"][0]
+            self.assertEqual((run["first"], run["last"], run["length"]), (2, 3, 2))
+            self.assertEqual(run["duration_seconds"], .125)
+            self.assertEqual((run["preceding_trusted_frame"], run["following_trusted_frame"]), (1, 4))
 
     def test_match_report_and_transform(self):
         report_path = DEFAULT_MATCH_REPORT

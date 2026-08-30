@@ -4,6 +4,14 @@ This file records the retained rationale after the 2026-08-27 research cleanup.
 All work was isolated from production code, calibration, DNGs, manifests, and
 production outputs.
 
+## P08 — cheap same-frame Y refinement
+
+P08 held the trusted P07 pair and frozen geometry fixed and evaluated only
+−5…+5 px using upper/lower horizontal-boundary polarity. Opposing upper/lower
+peaks and boundary maxima forced 347/351 conservative no-op decisions; the four
+accepted corrections did not materially change jitter statistics. Outcome C:
+preserve the experiment, do not integrate or loosen it.
+
 ## Evolution of the design
 
 1. **Residual edge and corrected-recrop POCs.** A visible upper sprocket edge
@@ -94,8 +102,51 @@ production outputs.
     cases, and mandatory regressions are identical; three-worker throughput
     improves 1.066x. An apparently faster uint8 histogram percentile was
     rejected after six exact mismatches in 5,280 micro-tests.
+16. **P07 validated production cascade integration.** The frozen physical-hole,
+    P06, and exact-cache P07 stages were ported behind `physical-p07-v1` while
+    retaining `legacy` rollback, one development/one final crop, audit-grade
+    provenance, and conservative unresolved handling. Direct P07 equivalence
+    passed 198/198; controlled use remains gated on the headless OpenCV runtime
+    and full-reel cascade validation.
 
 ## Current reproducible research path
+
+The later precision-registration metrology path is intentionally separate from
+detector development. P14 tested upper-bottom and lower-top as interchangeable
+canonical edges, but found a stable optical interval near 519.94 px rather than
+the nominal 513 px. P15 therefore uses the frozen lower-top meter directly with
+one Primary-only crop offset. It recovered known several-pixel anchor errors on
+matched frames, but its 80.9% coverage leaves missing-edge fallback as a
+separate future problem; production was not changed.
+
+P16 tested that missing-edge fallback without nominal geometry. A frozen
+Primary-calibrated upper-bottom optical offset validated well but added only
+four frames (82.1% combined coverage). A separately calibrated lower-bottom
+check added no safe coverage and showed errors up to 8.40 px on held-out P07,
+so P16 stopped with 63 unresolved frames and no production change.
+
+P17 asked whether short surviving fragments from any of four horizontal edges
+could recover those 63 frames. Only lower-bottom passed a substantial held-out
+validation population safely, and it recovered zero unresolved frames;
+upper-top showed a 21.4% >3 px false rate. The physical-edge fallback approach
+was stopped with no production change.
+
+P18–P20 isolated the registration question from detector identity. Trusted
+anchors and residual estimators were not themselves precise enough, while the
+frozen P07 rigid geometry did contain a useful lower-top coordinate with one
+global optical offset. P21 established the simple P15-first/P07-fallback policy;
+P22 refined only the already-accepted rigid pair's common Y translation on a
+frozen ±3 px, 0.25 px grid and froze the model-to-P15 offset at
+4.178787846871160 px.
+
+P23 independently evaluated the frozen policy on 450 predeclared frames from
+Reel_46335, Reel_28486, and Blue_Reel. P15 succeeded on 449/450, P07 accepted
+450/450, and overlap MedAE/P95 were 0.520/1.459 px. Eleven errors exceeded 2 px
+and six exceeded 3 px, with a 4.698 px maximum. Audit showed correct P15 edges
+and correct P07 pair identity; the residual limitation is occasional P22 local-Y
+imprecision. P23 therefore recorded Decision B. The project subsequently chose
+to promote this exact architecture, explicitly accepting that tail as a known
+production limitation and prohibiting retuning or per-reel calibration.
 
 Retained active implementations:
 
@@ -159,6 +210,7 @@ Detailed final reports are under `docs/`, particularly:
 - `07_02_frozen_blind_validation_report.md`
 - `07_03_production_integration_performance_research.md`
 - `07_04_exact_equivalence_template_optimization.md`
+- `07_05_validated_sprocket_cascade_production_integration.md`
 
 Retained generated evidence is intentionally small: final JSON/CSV summaries,
 current contact sheets, three current Reel_46335 recovery clips, the prior

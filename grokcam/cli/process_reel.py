@@ -33,6 +33,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--match-report", type=Path, help="override the learned color-match report")
     result.add_argument("--vertical-stabilization", action="store_true",
                         help="enable second-stage physical vertical registration")
+    result.add_argument("--sprocket-detector-mode", choices=["legacy", "physical-p07-v1"],
+                        help="versioned primary-registration cascade (default from calibration)")
     return result
 
 
@@ -44,6 +46,8 @@ def main() -> None:
             calibration,
             vertical_stabilization=replace(calibration.vertical_stabilization, enabled=True),
         )
+    if args.sprocket_detector_mode:
+        calibration = replace(calibration, sprocket_detector_mode=args.sprocket_detector_mode)
     options = RunOptions(
         raw_dir=args.raw_dir, output_dir=args.output_dir, first=args.first, last=args.last,
         batch_frames=args.batch_frames, fps=args.fps, jobs=args.jobs,

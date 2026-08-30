@@ -1,0 +1,15 @@
+{
+  "version": "p16-upper-bottom-fallback-v1",
+  "candidate_landmark": "upper_sprocket_bottom",
+  "calibration_rule": "clean Primary frames with both frozen P14 edges valid and even frame number",
+  "held_out_rule": "clean Primary frames with both frozen P14 edges valid and odd frame number",
+  "calibration_frame_count": 120,
+  "held_out_primary_frame_count": 117,
+  "lower_top_minus_upper_bottom_px": 520.0043389963826,
+  "calibration_mad_px": 0.42220692788976066,
+  "p15_crop_top_minus_lower_top_y": -673.5297914597816,
+  "exploratory_lower_bottom_minus_lower_top_px": 264.61796606209293,
+  "exploratory_lower_bottom_calibration_frame_count": 108,
+  "exploratory_lower_bottom_calibration_mad_px": 0.5963996590910483,
+  "exploratory_lower_bottom_disposition": "rejected_not_used"
+}

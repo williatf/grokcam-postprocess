@@ -1,0 +1,17 @@
+{
+  "version": "p22-subgrid-frozen-p07-y-v1-frozen",
+  "parent": "p21-p15-first-p07-fallback-v1-frozen",
+  "p07_detector_mode": "physical-p07-v1",
+  "accepted_hypothesis_policy": "retain frozen P07 winner and acceptance unchanged",
+  "fixed_geometry": ["pair identity", "x", "pitch", "hole width", "hole height", "relative geometry"],
+  "refined_quantity": "common rigid-pair y translation only",
+  "search_radius_px": 3.0,
+  "search_step_px": 0.25,
+  "score": "frozen P07 non-full pair candidate raw score minus frozen weak-prior penalty",
+  "tie_break": "closest to frozen y, then negative shift",
+  "model_lower_top_definition": "refined_lower_center_y - 136",
+  "p22_model_to_p15_lower_top_offset_px": 4.17878784687116,
+  "calibration_population": "P15-valid even frames with accepted frozen P07, n=144",
+  "fallback_population": "67 P15-missing accepted P07 hypotheses; not inspected before this freeze",
+  "failure_policy": "P07 rejection remains unresolved; refinement never rescues or changes acceptance"
+}

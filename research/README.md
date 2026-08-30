@@ -56,7 +56,45 @@ P07 frozen blind validation (passed: 0 false accepts, 1 conservative false rejec
 P07 production integration/performance research (architecture sound; equivalence work remains)
     ↓
 P07 exact-equivalence candidate memoization (198/198 identical; ready for integration implementation)
+    ↓
+P07 validated production cascade integration (controlled production validation pending)
+    ↓
+P08 bounded same-frame Y refinement (safe/cheap, but ineffective; do not integrate)
+    ↓
+P14 detector-guided two-edge metrology (systematic optical/nominal gap mismatch)
+    ↓
+P15 direct lower-top landmark registration (promising; incomplete coverage)
+    ↓
+P16 calibrated upper-bottom fallback (accurate when present; only 4 recoveries)
+    ↓
+P17 four-edge partial segments (0 safe recoveries; edge fallback path stopped)
 ```
+
+P08 held the trusted P07 pair fixed and tested only a ±5 px Y neighborhood.
+Opposing upper/lower boundary peaks caused 347/351 conservative no-op results;
+the four accepted corrections did not materially change jitter statistics.
+Production remains unchanged.
+
+P15 restores the original simple-edge concept using the modern detector only
+to locate a narrow lower-hole-top ROI. A single Primary-calibrated crop offset
+is then applied to the measured image edge for every source; no nominal
+upper/lower conversion is used. Run it with:
+
+```bash
+research/run_python.sh research/p15_single_landmark_lower_top_registration.py --help
+```
+
+P16 independently calibrated the upper-bottom optical gradient to the P15
+lower-top coordinate using held-out Primary validation. The conversion was
+accurate where measurable, but recovered only 4/67 missing P15 frames; the
+separately calibrated lower-bottom candidate was rejected for sparse coverage
+and large fallback-source errors.
+
+P17 split all four horizontal boundaries into short physical-evidence windows
+and calibrated every edge independently to P15 lower-top. Lower-bottom
+validated accurately but recovered none of the remaining 63 frames; upper-top
+produced several-pixel held-out false measurements. The partial-edge recovery
+line therefore ends at P17 without production integration.
 
 The P07 documents follow that progression explicitly:
 
@@ -64,6 +102,7 @@ The P07 documents follow that progression explicitly:
 2. `docs/07_02_frozen_blind_validation_report.md`
 3. `docs/07_03_production_integration_performance_research.md`
 4. `docs/07_04_exact_equivalence_template_optimization.md`
+5. `docs/07_05_validated_sprocket_cascade_production_integration.md`
 
 - `p01_hybrid_capture_prior_poc.py` tested capture boxes as search priors while
   remeasuring full-resolution pixels. Its 1-D bright-band evidence was safe but

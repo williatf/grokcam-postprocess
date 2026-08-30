@@ -59,6 +59,7 @@ class ProductionCalibration:
     vertical_stabilization: VerticalStabilizationCalibration = field(
         default_factory=VerticalStabilizationCalibration
     )
+    sprocket_detector_mode: str = "legacy"
     contrast: float = 1.04
     picture_aperture_x: tuple[float, float] = (0.15, 0.92)
     picture_aperture_y: tuple[float, float] = (0.12, 0.88)
@@ -76,7 +77,7 @@ def load_calibration(path: Path | None = None, match_report: Path | None = None)
     calibration = ProductionCalibration()
     if path is not None:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        allowed = {"detector", "crop", "match", "vertical_stabilization", "contrast", "picture_aperture_x",
+        allowed = {"detector", "crop", "match", "vertical_stabilization", "sprocket_detector_mode", "contrast", "picture_aperture_x",
                    "picture_aperture_y", "exposure_limit_stops", "white_balance_blend"}
         unknown = set(raw) - allowed
         if unknown:
@@ -91,6 +92,8 @@ def load_calibration(path: Path | None = None, match_report: Path | None = None)
                   if k not in {"detector", "crop", "match", "vertical_stabilization"}}
         calibration = replace(calibration, detector=detector, crop=crop, match=match,
                               vertical_stabilization=vertical, **scalar)
+    if calibration.sprocket_detector_mode not in {"legacy", "physical-p07-v1"}:
+        raise ValueError("sprocket_detector_mode must be legacy or physical-p07-v1")
     if match_report is not None:
         calibration = replace(calibration, match=MatchCalibration(match_report))
     return calibration

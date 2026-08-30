@@ -9,6 +9,19 @@ from .config import DetectorCalibration
 from .models import SprocketDetection
 
 
+def _batch_acceptance(detections, calibration):
+    raw = np.array([(d.cx, d.cy) if d else (np.nan, np.nan) for d in detections], dtype=float)
+    detected = np.array([d is not None for d in detections], dtype=bool)
+    accepted = detected.copy()
+    for axis, limit in ((0, calibration.horizontal_outlier_limit), (1, calibration.vertical_outlier_limit)):
+        series = raw[:, axis]
+        safe = np.where(np.isfinite(series), series, np.nanmedian(series))
+        padded = np.pad(safe, 2, mode="edge")
+        local = np.array([np.median(padded[i:i + 5]) for i in range(len(series))])
+        accepted &= np.isfinite(series) & (np.abs(series - local) < limit)
+    return raw, detected, accepted
+
+
 def runs(mask: np.ndarray) -> list[tuple[int, int]]:
     result: list[tuple[int, int]] = []
     start = None
@@ -54,15 +67,7 @@ def detect(image: Image.Image, calibration: DetectorCalibration) -> SprocketDete
 
 
 def validate_batch(detections: list[SprocketDetection | None], calibration: DetectorCalibration) -> list[SprocketDetection]:
-    raw = np.array([(d.cx, d.cy) if d else (np.nan, np.nan) for d in detections], dtype=float)
-    detected = np.array([d is not None for d in detections], dtype=bool)
-    accepted = detected.copy()
-    for axis, limit in ((0, calibration.horizontal_outlier_limit), (1, calibration.vertical_outlier_limit)):
-        series = raw[:, axis]
-        safe = np.where(np.isfinite(series), series, np.nanmedian(series))
-        padded = np.pad(safe, 2, mode="edge")
-        local = np.array([np.median(padded[i:i + 5]) for i in range(len(series))])
-        accepted &= np.isfinite(series) & (np.abs(series - local) < limit)
+    raw, detected, accepted = _batch_acceptance(detections, calibration)
     positions = np.arange(len(raw))
     output = raw.copy()
     for axis in range(2):
@@ -74,3 +79,53 @@ def validate_batch(detections: list[SprocketDetection | None], calibration: Dete
                               detected=bool(detected[i]), accepted=bool(accepted[i]),
                               interpolated=not bool(accepted[i]))
             for i, (x, y) in enumerate(output)]
+
+
+def validate_batch_with_physical(image_loader, detections, calibration, capture_items=None):
+    """Resolve from same-frame evidence; leave unresolved frames excluded."""
+    from .physical_sprocket import detect_fallback
+    capture_items = capture_items or [None] * len(detections)
+    raw, detected, accepted = _batch_acceptance(detections, calibration)
+    details = []
+    for index, _prior in enumerate(detections):
+        detail = {"physical_fallback_stage": None, "p06_attempted": False,
+                  "p06_accepted": False, "p07_attempted": False, "p07_accepted": False,
+                  "primary_detected": bool(detected[index]),
+                  "primary_accepted": bool(accepted[index]),
+                  "primary_rejected_anchor": (None if accepted[index] or detections[index] is None else
+                      {"x": detections[index].cx, "y": detections[index].cy,
+                       "score": detections[index].score})}
+        if accepted[index]:
+            detail["final_registration_source"] = "primary"
+        else:
+            # Capture boxes only define search ROIs. The accepted anchor always
+            # comes from full-resolution same-frame image evidence.
+            with image_loader(index) as image:
+                result = detect_fallback(image, capture_items[index])
+            stage=result.diagnostics.get("stage","p07")
+            detail.update({"physical_fallback_stage": stage,
+                           "p06_attempted": stage in {"p06","p07"} and result.diagnostics.get("p06") is not None,
+                           "p06_accepted": stage == "p06",
+                           "p07_attempted": stage == "p07", "p07_accepted": stage == "p07" and result.accepted,
+                           "physical_diagnostics": result.diagnostics,
+                           "physical_rejection_reason": None if result.accepted else result.classification})
+            if result.accepted:
+                raw[index] = (result.anchor_x, result.anchor_y)
+                accepted[index] = True
+                detail["final_registration_source"] = {"physical_pair":"physical_pair","p06":"physical_p06","p07":"physical_p07"}[stage]
+            else:
+                detail.update({"final_registration_source": None,
+                               "output_disposition": "excluded",
+                               "exclusion_reason": result.classification})
+        details.append(detail)
+    resolved=[]
+    for i,(x,y) in enumerate(raw):
+        if not accepted[i]:
+            resolved.append(None)
+            continue
+        score=detections[i].score if detections[i] else None
+        resolved.append(SprocketDetection(float(x),float(y),score,
+                        detector=details[i]["final_registration_source"],
+                        detected=bool(detected[i]),accepted=True,interpolated=False))
+        details[i].setdefault("output_disposition", "included")
+    return resolved, details

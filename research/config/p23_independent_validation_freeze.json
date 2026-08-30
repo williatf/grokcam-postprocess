@@ -1,0 +1,68 @@
+{
+  "version": "p23-independent-validation-v1-frozen-pre-evaluation",
+  "frozen_at": "2026-08-29",
+  "populations": [
+    {
+      "id": "reel46335_3000_3149",
+      "reel": "Reel_46335",
+      "raw_dir": "/mnt/GrokCam/projects/Reel_46335/raw",
+      "first": 3000,
+      "last": 3149,
+      "frames": 150,
+      "selection_reason": "Substantial contiguous range non-overlapping P15/P21/P22 development range; full RAW and capture metadata available"
+    },
+    {
+      "id": "reel28486_3000_3149",
+      "reel": "Reel_28486",
+      "raw_dir": "/mnt/GrokCam/projects/Reel_28486/raw",
+      "first": 3000,
+      "last": 3149,
+      "frames": 150,
+      "selection_reason": "Different reel; substantial contiguous RAW range with complete capture metadata"
+    },
+    {
+      "id": "blue_reel_3000_3149",
+      "reel": "Blue_Reel",
+      "raw_dir": "/mnt/GrokCam/projects/Blue_Reel/raw",
+      "first": 3000,
+      "last": 3149,
+      "frames": 150,
+      "selection_reason": "Different reel/content and exposure population; substantial contiguous RAW range with complete capture metadata"
+    }
+  ],
+  "selection_policy": "Ranges selected solely from independence, contiguity, RAW availability, and metadata availability before P15/P07/P22 evaluation",
+  "p15": {
+    "measurement_implementation": "research/p14_detector_guided_edge_registration.py",
+    "measurement_implementation_sha256": "2584c0cc8cf742b598bd4893be8a8442c78fc39dbeff6dbfb769db2b2c89d839",
+    "config": "research/config/p14_detector_guided_edge_registration.json",
+    "config_sha256": "80ff1afc96a5d7ce904dc0d1f0b0baf3bd88176fe8e79aa546f10c2f399642ba",
+    "authoritative_feature": "lower_top",
+    "anchor_policy": "forced frozen P07 accepted anchor used only to place the frozen P15 measurement ROI; never used as truth"
+  },
+  "p07": {
+    "implementation": "grokcam/physical_sprocket.py",
+    "implementation_sha256": "31152f8bc0d3e91276a2ce15f5d518e2a066bd8ec46e707ded133b136355361d",
+    "detector_mode": "physical-p07-v1",
+    "frozen_source_implementation_sha256": "d78bc8478308451af69d37dc7485cb5c0a15cd7a59ccdb75ec86932a498fd13d",
+    "frozen_configuration_sha256": "334abf89ee43a0eb18c7f33e68eb8afb9f38556ff981136ac16f5d30b646a1c6"
+  },
+  "p22": {
+    "implementation": "research/p22_refine_frozen_p07_y.py",
+    "implementation_sha256": "b828812ebdd52059d71a0ce9210bbc7d71eac01bb9b550b6eb8dd041cee45529",
+    "config": "research/config/p22_subgrid_frozen_p07_y.json",
+    "config_sha256": "753a2cbb85b4a67d4cbe9c5475c8cb9d156b0076dfaf38baa5b2a45ee1f0caac",
+    "search_radius_px": 3.0,
+    "search_step_px": 0.25,
+    "global_offset_px": 4.17878784687116,
+    "shallow_score_threshold": 0.01
+  },
+  "development": {
+    "calibration": "calibrations/darktable_match_v1.json",
+    "calibration_sha256": "d5a4526b6b5e38fd9d7b37876b0ec39cb37a370d066419433db38f978cb3dc96"
+  },
+  "prohibited": [
+    "retuning", "independent-set recalibration", "source-specific offsets",
+    "temporal interpolation", "temporal smoothing", "neighbor prediction",
+    "motion minimization", "alternate fallback", "production modification"
+  ]
+}

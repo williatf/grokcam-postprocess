@@ -71,7 +71,7 @@ layers:
 | Entry and composition | `grokcam.cli.process_reel`, `grokcam.pipeline` | Parse the supported CLI, load calibration, and invoke the production pipeline. |
 | Batch lifecycle | `grokcam.batch`, `grokcam.resume`, `grokcam.timing` | Select frames, lock an output, plan/resume batches, stage work, order the stages, report timing, clean work, and finalize. |
 | RAW development | `grokcam.raw_development` | Validate and apply the frozen rawpy-to-Darktable match and write 16-bit TIFFs. |
-| Film geometry | `grokcam.sprocket_detection`, `grokcam.registration`, `grokcam.vertical_stabilization`, `grokcam.image_processing` | Detect and validate primary anchors, optionally refine vertical alignment from retained sprocket boundaries, calculate crop coordinates, resample once for final output, orient, and apply contrast. |
+| Film geometry | `grokcam.sprocket_detection`, `grokcam.physical_sprocket`, `grokcam.registration`, `grokcam.vertical_stabilization`, `grokcam.image_processing` | Detect and validate primary anchors, optionally recover rejected frames with frozen P07 physical evidence, refine vertical alignment, calculate crop coordinates, resample once for final output, orient, and apply contrast. |
 | Presentation normalization | `grokcam.normalization` | Apply bounded, temporally smoothed exposure and channel corrections. |
 | Video and records | `grokcam.encoding`, `grokcam.manifest`, `grokcam.regression` | Encode and verify video, write atomic manifests, calculate hashes, and compare results with a reference. |
 | Configuration and data | `grokcam.config`, `grokcam.models` | Own calibrated constants and structured geometry/detection values. |
@@ -88,7 +88,10 @@ RunOptions + ProductionCalibration
    threaded DarktableMatchedDeveloper
               |
               v
-      detect each TIFF -> validate batch
+      detect each TIFF -> validate primary batch
+              |
+              v
+ rejected only: capture-ROI physical pair -> P06 partner -> full P07
               |
               v
  optional residual measurement -> resolve corrections
@@ -166,6 +169,7 @@ operational choice that reduces peak disposable storage and restart cost.
 | `--calibration FILE` | none | Advanced JSON overrides for production calibration. Not needed for normal v1 processing. |
 | `--match-report FILE` | repository v1 artifact | Explicitly override the learned match report. Avoid for normal v1 production. |
 | `--vertical-stabilization` | off | Enable second-stage physical vertical registration. Use a new output directory. |
+| `--sprocket-detector-mode MODE` | `legacy` | Select `legacy` rollback behavior or the frozen `physical-p07-v1` same-frame fallback cascade. Never mix modes in one output directory. |
 | `-h`, `--help` | — | Print the authoritative CLI usage and exit. |
 
 The current configuration loader accepts detector, crop, match-report,
@@ -399,16 +403,18 @@ The best candidate supplies `cx` as the mean horizontal center and `cy` as the
 midpoint between the two band centers. If no candidate survives, that frame has
 no direct detection.
 
-### Batch validation and interpolation
+### Batch validation and failure policy
 
 Direct detections are validated separately in `x` and `y` against a five-frame
 local median with edge padding. A measurement is accepted only when it is finite
 and lies strictly within the 12 px horizontal and 45 px vertical limits.
 
-For each coordinate, rejected or missing positions are filled with NumPy linear
-interpolation between accepted measurements. At a batch edge, interpolation
-holds the nearest accepted value. If the batch has no usable measurements for an
-axis, processing stops with `No usable sprocket measurements in batch`.
+The rollback `legacy` mode fills rejected or missing coordinates with its
+historical NumPy interpolation. In `physical-p07-v1`, a rejected primary instead
+passes through the same-frame physical-pair, P06, and full-domain P07 cascade.
+If every stage fails, the frame is excluded from encoding, its uncropped
+developed TIFF is preserved under `debug/excluded_frames/`, and processing
+continues. No temporal registration interpolation occurs in this mode.
 
 This is the primary detector. When second-stage vertical stabilization is
 enabled, its result still determines the initial frame location; residual
@@ -419,7 +425,7 @@ registration refines only the final vertical crop coordinate.
 Detection measures film position; registration uses that measurement to place a
 fixed presentation window. They are distinct stages.
 
-For each validated/interpolated anchor:
+For each accepted trusted anchor (or historical legacy interpolated anchor):
 
 ```text
 crop_left = anchor_x + 159.0
@@ -517,7 +523,7 @@ Within each batch:
 
 1. Recreate `.staging/segment_FIRST_LAST/` from scratch.
 2. Develop DNGs concurrently into 16-bit TIFFs.
-3. Detect sprockets serially and validate/interpolate the batch.
+3. Detect sprockets serially; validate them and apply the configured failure policy.
 4. Crop, orient, and write registered JPEGs.
 5. Delete TIFFs.
 6. Normalize registered JPEGs.
@@ -637,7 +643,7 @@ new output directories.
 Each segment records:
 
 ```text
-first, last, frames, video, video_bytes, video_sha256
+first, last, frames, source_frames, excluded, video, video_bytes, video_sha256
 verified, verification, reference_sprocket_x
 detected, accepted, interpolated
 elapsed_seconds, completed, frame_records, retained
@@ -656,6 +662,9 @@ frame, source_name, source_bytes
 anchor_x, anchor_y
 detected, accepted, detector_score
 crop_left, crop_top
+output_disposition, encoded_output_frame, final_registration_source
+exclusion_reason, debug_developed_image, primary_rejected_anchor
+physical_fallback_stage, physical_diagnostics
 vertical_stabilization_enabled
 residual_sprocket_y, residual_confidence, residual_search_mode
 residual_source, residual_correction_y, corrected_crop_top
@@ -674,11 +683,13 @@ false and the residual-only fields are absent, preserving the former frame path.
 The `normalization` object contains `median_luma`, `channel_median`,
 `exposure_gain`, and `channel_gains_rgb`.
 
-There is no per-frame `interpolated` field in the current manifest. Interpret a
-frame with `accepted: false` as using an interpolated anchor. `detected` tells
-whether a direct candidate existed; a detected measurement can still be rejected
-as an outlier. The segment-level `interpolated` count is the number of unaccepted
-frame measurements.
+In `physical-p07-v1`, `accepted: false` and `output_disposition: excluded` mean
+the frame has no final anchor and no encoded output frame. The top-level
+`frame_mapping` records source, included, excluded, and encoded counts; its
+invariants require included equals encoded and source equals included plus
+excluded. `exclusion_runs` records consecutive omissions, their duration,
+trusted neighbors, reasons, and debug paths. Legacy manifests retain their
+historical interpretation.
 
 Pretty-print the manifest with:
 
@@ -770,8 +781,12 @@ restore the version-controlled file.
 
 ### Sprocket detection failure
 
-A single missing or rejected detection is recoverable through interpolation. A
-batch with no usable measurements stops with:
+In `physical-p07-v1`, an unresolved frame is excluded after every same-frame
+physical stage fails; it is never temporally registered. Consecutive exclusions
+do not stop the reel, but are prominently recorded for manual review. A source
+batch containing no trustworthy registration cannot produce a video segment and
+stops explicitly. In rollback `legacy` mode, a batch with no usable measurements
+stops with:
 
 ```text
 No usable sprocket measurements in batch
@@ -782,11 +797,12 @@ try a smaller test range in a new output directory. Do not adjust detector
 constants as part of recovering the production-v1 run; that would create a new
 algorithm/calibration variant requiring regression.
 
-### Interpolated detections
+### Excluded detections
 
-Inspect segment `interpolated` counts and frame records with `accepted: false`.
-Isolated interpolation is expected recovery behavior, but consecutive or
-frequent rejected frames warrant visual review of framing and source sprockets.
+For `physical-p07-v1`, inspect `frame_mapping`, `exclusion_runs`, and records
+whose `output_disposition` is `excluded`. Review their preserved full-resolution
+TIFFs and detector provenance. Any consecutive run warrants explicit visual
+review; it is an intentional movie-time discontinuity, not interpolation.
 
 ### Abnormal framing
 
@@ -799,7 +815,7 @@ crop_top  - anchor_y = -413.0
 ```
 
 If those relationships are correct but the picture is poorly framed, inspect
-the measured/interpolated anchor and source frame rather than treating crop and
+the trusted anchor and source frame rather than treating crop and
 detection as the same problem.
 
 ### Encoding failure

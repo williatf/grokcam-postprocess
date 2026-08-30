@@ -24,7 +24,7 @@ from .normalization import normalize_frames
 from .raw_development import DarktableMatchedDeveloper
 from .registration import crop_for_detection
 from .resume import completed_frame_numbers, contiguous_batches
-from .sprocket_detection import detect, validate_batch
+from .sprocket_detection import detect, validate_batch, validate_batch_with_physical
 from .timing import timed
 from .vertical_stabilization import (measure_frame, measurement_details,
                                      resolve_batch, verify_post_crop)
@@ -47,6 +47,13 @@ class RunOptions:
 
 def frame_number(path: Path) -> int:
     return int(path.stem.rsplit("_", 1)[-1])
+
+
+def preserve_excluded_tiff(source: Path, output_dir: Path) -> Path:
+    destination = output_dir / "debug" / "excluded_frames" / source.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return destination
 
 
 def select_dngs(options: RunOptions) -> list[Path]:
@@ -85,11 +92,33 @@ def finalize_if_complete(options: RunOptions, dngs: list[Path], manifest: dict,
     final = options.output_dir / f"RAW_review_{numbers[0]:06d}_{numbers[-1]:06d}_{options.fps}fps.mp4"
     temporary = final.with_suffix(".tmp.mp4")
     concatenate_segments(options.ffmpeg, concat, segment_paths, temporary)
-    verification = verify_video(options.ffmpeg, options.ffprobe, temporary, len(dngs))
+    encoded_frames = sum(int(item.get("frames", 0)) for item in ordered)
+    verification = verify_video(options.ffmpeg, options.ffprobe, temporary, encoded_frames)
     os.replace(temporary, final)
     manifest["final"] = {"video": str(final), "video_bytes": final.stat().st_size,
                          "video_sha256": file_sha256(final), "verified": True,
                          "verification": verification, "completed": utc_now()}
+    records = sorted([record for item in ordered for record in item.get("frame_records", [])],
+                     key=lambda record: record["frame"])
+    excluded = [record for record in records if record.get("output_disposition") == "excluded"]
+    runs = []
+    for record in excluded:
+        if not runs or record["frame"] != runs[-1]["last"] + 1:
+            runs.append({"first": record["frame"], "last": record["frame"],
+                         "frames": [record["frame"]], "reasons": [record.get("exclusion_reason")],
+                         "debug_artifacts": [record.get("debug_developed_image")]})
+        else:
+            run = runs[-1]; run["last"] = record["frame"]; run["frames"].append(record["frame"])
+            run["reasons"].append(record.get("exclusion_reason")); run["debug_artifacts"].append(record.get("debug_developed_image"))
+    by_frame = {record["frame"]: record for record in records}
+    for run in runs:
+        run["length"] = len(run["frames"]); run["duration_seconds"] = run["length"] / options.fps
+        run["preceding_trusted_frame"] = max((n for n, r in by_frame.items() if n < run["first"] and r.get("output_disposition") == "included"), default=None)
+        run["following_trusted_frame"] = min((n for n, r in by_frame.items() if n > run["last"] and r.get("output_disposition") == "included"), default=None)
+    manifest["frame_mapping"] = {"source_frames": len(records), "included_frames": encoded_frames,
+                                 "excluded_frames": len(excluded), "encoded_frames": encoded_frames,
+                                 "invariants_valid": (len(records) == encoded_frames + len(excluded))}
+    manifest["exclusion_runs"] = runs
     for path in segment_paths:
         path.unlink(missing_ok=True)
     concat.unlink(missing_ok=True)
@@ -146,6 +175,10 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
         return
 
     developer = DarktableMatchedDeveloper(calibration.match.report.expanduser().resolve())
+    capture_metadata = {}
+    if calibration.sprocket_detector_mode == "physical-p07-v1":
+        from .physical_sprocket import load_capture_metadata
+        capture_metadata = load_capture_metadata(raw_dir)
     for batch_index, batch in enumerate(batches, start=1):
         timings: dict[str, float] = defaultdict(float)
         first, last = frame_number(batch[0]), frame_number(batch[-1])
@@ -182,17 +215,30 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
                         measured.append(detect(image, calibration.detector))
                     except ValueError:
                         measured.append(None)
-            detections = validate_batch(measured, calibration.detector)
-            reference_x = float(np.median([item.cx for item in detections]))
+            physical_details = [{} for _ in measured]
+            if calibration.sprocket_detector_mode == "physical-p07-v1":
+                paths = [tiffs / f"{dng.stem}.tif" for dng in batch]
+                detections, physical_details = validate_batch_with_physical(
+                    lambda index: Image.open(paths[index]), measured, calibration.detector,
+                    [capture_metadata.get(frame_number(dng)) for dng in batch],
+                )
+            else:
+                detections = validate_batch(measured, calibration.detector)
+            trusted = [item for item in detections if item is not None]
+            reference_x = float(np.median([item.cx for item in trusted])) if trusted else None
 
         with timed("crop_register", timings):
             frame_records = []
-            primary_crops = [crop_for_detection(item, calibration.crop) for item in detections]
+            included = [(index, dng, detection) for index, (dng, detection) in
+                        enumerate(zip(batch, detections)) if detection is not None]
+            if not included:
+                raise RuntimeError(f"No trustworthy registrations in source batch {first}-{last}")
+            primary_crops = [crop_for_detection(item[2], calibration.crop) for item in included]
             stabilization = None
             if calibration.vertical_stabilization.enabled:
-                measured = []
+                residual_measured = []
                 developed_heights = []
-                for dng, detection, crop in zip(batch, detections, primary_crops):
+                for (_, dng, detection), crop in zip(included, primary_crops):
                     with Image.open(tiffs / f"{dng.stem}.tif") as image:
                         developed_heights.append(image.height)
                         provisional = registered_frame(image, crop, calibration.contrast)
@@ -202,39 +248,63 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
                     provisional.save(serialized, format="JPEG", quality=95, subsampling=0)
                     serialized.seek(0)
                     with Image.open(serialized) as detector_image:
-                        measured.append(measure_frame(
+                        residual_measured.append(measure_frame(
                             detector_image, detection, calibration.vertical_stabilization
                         ))
                 stabilization = resolve_batch(
-                    measured, primary_crops, developed_heights,
+                    residual_measured, primary_crops, developed_heights,
                     calibration.vertical_stabilization,
                 )
 
-            for index, (dng, detection, primary_crop) in enumerate(
-                    zip(batch, detections, primary_crops)):
-                result = None if stabilization is None else stabilization[index]
+            encoded_before = sum(int(item.get("frames", 0)) for item in manifest["segments"])
+            included_records = []
+            included_position = {source_index: position for position, (source_index, _, _) in enumerate(included)}
+            excluded_dir = output_dir / "debug" / "excluded_frames"
+            for index, (dng, detection) in enumerate(zip(batch, detections)):
+                if detection is None:
+                    debug_path = preserve_excluded_tiff(tiffs / f"{dng.stem}.tif", output_dir)
+                    record = {
+                        "frame": frame_number(dng), "source_name": dng.name,
+                        "source_bytes": dng.stat().st_size, "anchor_x": None,
+                        "anchor_y": None, "detected": physical_details[index].get("primary_detected", False),
+                        "accepted": False, "detector_score": None,
+                        "crop_left": None, "crop_top": None,
+                        "vertical_stabilization_enabled": False,
+                        "output_disposition": "excluded", "encoded_output_frame": None,
+                        "debug_developed_image": str(debug_path),
+                    }
+                    record.update(physical_details[index])
+                    frame_records.append(record)
+                    continue
+                position = included_position[index]
+                primary_crop = primary_crops[position]
+                result = None if stabilization is None else stabilization[position]
                 crop = primary_crop if result is None else result.corrected_crop
                 with Image.open(tiffs / f"{dng.stem}.tif") as image:
                     movie = registered_frame(image, crop, calibration.contrast)
-                destination = registered / f"{dng.stem}.jpg"
+                encoded_number = encoded_before + position + 1
+                destination = registered / f"frame_{encoded_number:06d}.jpg"
                 movie.save(destination, quality=95, subsampling=0)
                 record = {
                     "frame": frame_number(dng), "source_name": dng.name,
                     "source_bytes": dng.stat().st_size, "anchor_x": detection.cx,
                     "anchor_y": detection.cy, "detected": detection.detected,
                     "accepted": detection.accepted, "detector_score": detection.score,
-                    "crop_left": crop.left, "crop_top": primary_crop.top,
+                    "crop_left": crop.left, "crop_top": crop.top,
                     "vertical_stabilization_enabled": result is not None,
+                    "output_disposition": "included", "encoded_output_frame": encoded_number,
                 }
+                record.update(physical_details[index])
                 if result is not None:
                     record.update(result.diagnostics)
-                    record["normal_residual_measurement"] = measurement_details(measured[index].normal)
-                    record["expanded_residual_measurement"] = measurement_details(measured[index].expanded)
+                    record["normal_residual_measurement"] = measurement_details(residual_measured[position].normal)
+                    record["expanded_residual_measurement"] = measurement_details(residual_measured[position].expanded)
                     with Image.open(destination) as serialized_movie:
                         record.update(verify_post_crop(
                             serialized_movie, calibration.vertical_stabilization
                         ))
                 frame_records.append(record)
+                included_records.append(record)
         shutil.rmtree(tiffs)
 
         registered_paths = sorted(registered.glob("frame_*.jpg"), key=frame_number)
@@ -243,21 +313,22 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
                 registered_paths, normalized, manifest["normalization"].get("target_median_luma"))
             if "target_median_luma" not in manifest["normalization"]:
                 manifest["normalization"]["target_median_luma"] = target
-            for record, correction in zip(frame_records, corrections):
+            for record, correction in zip(included_records, corrections):
                 record["normalization"] = correction
 
         with timed("ffmpeg_encode", timings):
             video = segments_dir / f"frames_{first:06d}_{last:06d}_16fps.mp4"
             temporary_video = video.with_suffix(".tmp.mp4")
-            encode_segment(options.ffmpeg, normalized, temporary_video, first, len(batch), options.fps)
-        verification = verify_video(options.ffmpeg, options.ffprobe, temporary_video, len(batch))
+            encode_segment(options.ffmpeg, normalized, temporary_video,
+                           encoded_before + 1, len(included), options.fps)
+        verification = verify_video(options.ffmpeg, options.ffprobe, temporary_video, len(included))
         os.replace(temporary_video, video)
-        segment = {"first": first, "last": last, "frames": len(batch), "video": str(video),
+        segment = {"first": first, "last": last, "frames": len(included),
+                   "source_frames": len(batch), "excluded": len(batch) - len(included), "video": str(video),
                    "video_bytes": video.stat().st_size, "video_sha256": file_sha256(video),
                    "verified": True, "verification": verification, "reference_sprocket_x": reference_x,
-                   "detected": sum(item.detected for item in detections),
-                   "accepted": sum(item.accepted for item in detections),
-                   "interpolated": sum(item.interpolated for item in detections),
+                   "detected": sum(item.detected for item in trusted),
+                   "accepted": len(trusted), "interpolated": 0,
                    "elapsed_seconds": round(time.time() - started, 2),
                    "completed": utc_now(), "frame_records": frame_records}
         record_segment(manifest_path, manifest, segment)

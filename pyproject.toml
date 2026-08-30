@@ -7,7 +7,7 @@ name = "grokcam-postprocess"
 version = "2.0.0"
 description = "Archival GrokCam RAW post-processing"
 requires-python = ">=3.11"
-dependencies = ["numpy", "Pillow", "rawpy", "tifffile"]
+dependencies = ["numpy", "Pillow", "rawpy", "tifffile", "opencv-python-headless>=4.12,<5"]
 
 [project.scripts]
 grokcam-process-reel = "grokcam.cli.process_reel:main"
