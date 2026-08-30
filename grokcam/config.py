@@ -59,7 +59,7 @@ class ProductionCalibration:
     vertical_stabilization: VerticalStabilizationCalibration = field(
         default_factory=VerticalStabilizationCalibration
     )
-    sprocket_detector_mode: str = "legacy"
+    sprocket_detector_mode: str = "physical-p07-v1"
     contrast: float = 1.04
     picture_aperture_x: tuple[float, float] = (0.15, 0.92)
     picture_aperture_y: tuple[float, float] = (0.12, 0.88)

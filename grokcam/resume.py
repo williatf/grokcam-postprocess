@@ -6,7 +6,9 @@ from pathlib import Path
 def completed_frame_numbers(segments: list[dict]) -> set[int]:
     completed: set[int] = set()
     for item in segments:
-        if item.get("verified") and Path(item["video"]).exists():
+        retained = (item.get("excluded_only_segment") is True or
+                    (item.get("video") and Path(item["video"]).exists()))
+        if item.get("verified") and retained:
             completed.update(range(int(item["first"]), int(item["last"]) + 1))
     return completed
 

@@ -15,6 +15,20 @@ from PIL import Image
 from . import __version__
 from .config import ProductionCalibration
 from .encoding import tool_version
+from .precision_registration import (MODEL_TO_OPTICAL_OFFSET_Y,
+                                     OPTICAL_LOWER_TOP_TO_CROP_TOP,
+                                     P15_CONFIGURATION_SHA256,
+                                     P15_IMPLEMENTATION_SHA256,
+                                     P22_CONFIGURATION_SHA256,
+                                     P22_IMPLEMENTATION_SHA256,
+                                     P22_RADIUS, P22_SHALLOW_MARGIN, P22_STEP,
+                                     P24_CAPTURE_Y_BIAS, P24_FREEZE_SHA256,
+                                     P24_GATE_SHA256, P24_HEIGHT_DIFFERENCE_MIN,
+                                     P24_HEIGHT_RANGE, P24_PHYSICAL_SCORE_MAX,
+                                     P24_PHYSICAL_Y_BIAS, P24_PITCH_RANGE,
+                                     P24_WIDTH_MIN, P24_X_DISPLACEMENT_MAX,
+                                     P24_Y_AGREEMENT_MAX, P25_CALIBRATION_SHA256,
+                                     P25_CAPTURE_X_BIAS, P25_FREEZE_SHA256)
 
 DETECTOR_MODE = "physical-p07-v1"
 P07_IMPLEMENTATION_SHA256 = "d78bc8478308451af69d37dc7485cb5c0a15cd7a59ccdb75ec86932a498fd13d"
@@ -24,6 +38,10 @@ EXACT_CACHE_IMPLEMENTATION_SHA256 = "459093853b1f4fb5843849ffd034d31984a89f554a0
 
 def physical_module_sha256() -> str:
     return hashlib.sha256((Path(__file__).with_name("physical_sprocket.py")).read_bytes()).hexdigest()
+
+
+def precision_registration_module_sha256() -> str:
+    return hashlib.sha256((Path(__file__).with_name("precision_registration.py")).read_bytes()).hexdigest()
 
 PIPELINE_ID = "grokcam_postprocess"
 
@@ -40,7 +58,7 @@ def atomic_json(path: Path, value: dict) -> None:
 
 def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batch_frames: int,
                    calibration: ProductionCalibration, ffmpeg: Path) -> dict:
-    expected_failure_policy = ("exclude_unresolved" if
+    expected_failure_policy = ("primary_p15_p24_p25_p15_p07_p22_exclude" if
                                calibration.sprocket_detector_mode == DETECTOR_MODE else
                                "legacy_interpolation")
     if path.exists():
@@ -52,6 +70,10 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
             recorded_hash = manifest["sprocket_registration"].get("production_module_sha256")
             if recorded_hash != physical_module_sha256():
                 raise RuntimeError("Cannot resume with a different physical P07 production module hash")
+            precision_hash = manifest["sprocket_registration"].get(
+                "precision_registration_module_sha256")
+            if precision_hash != precision_registration_module_sha256():
+                raise RuntimeError("Cannot resume with a different precision-registration module hash")
         recorded_policy = manifest.get("sprocket_registration", {}).get(
             "failure_policy", "legacy_interpolation")
         if recorded_policy != expected_failure_policy:
@@ -88,7 +110,30 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
             "p07_configuration_sha256": P07_CONFIGURATION_SHA256 if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
             "exact_cache_implementation_sha256": EXACT_CACHE_IMPLEMENTATION_SHA256 if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
             "production_module_sha256": physical_module_sha256() if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "precision_registration_module_sha256": precision_registration_module_sha256() if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
             "failure_policy": expected_failure_policy,
+            "p15_implementation_sha256": P15_IMPLEMENTATION_SHA256 if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p15_configuration_sha256": P15_CONFIGURATION_SHA256 if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p22_implementation_sha256": P22_IMPLEMENTATION_SHA256 if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p22_configuration_sha256": P22_CONFIGURATION_SHA256 if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p22_search_radius_px": P22_RADIUS if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p22_search_step_px": P22_STEP if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p22_shallow_margin_threshold": P22_SHALLOW_MARGIN if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p07_model_to_p15_optical_offset_y": MODEL_TO_OPTICAL_OFFSET_Y if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p24_freeze_sha256": P24_FREEZE_SHA256 if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p24_gate_sha256": P24_GATE_SHA256 if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p25_freeze_sha256": P25_FREEZE_SHA256 if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p25_calibration_sha256": P25_CALIBRATION_SHA256 if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p24_capture_y_bias": P24_CAPTURE_Y_BIAS if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p24_physical_y_bias": P24_PHYSICAL_Y_BIAS if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p25_capture_x_bias": P25_CAPTURE_X_BIAS if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "p24_frozen_gate": ({"pitch_range": P24_PITCH_RANGE, "width_min": P24_WIDTH_MIN,
+                "height_range": P24_HEIGHT_RANGE, "height_difference_min": P24_HEIGHT_DIFFERENCE_MIN,
+                "x_displacement_max": P24_X_DISPLACEMENT_MAX,
+                "y_agreement_max": P24_Y_AGREEMENT_MAX,
+                "physical_score_max": P24_PHYSICAL_SCORE_MAX} if calibration.sprocket_detector_mode == DETECTOR_MODE else None),
+            "optical_lower_top_to_crop_top": OPTICAL_LOWER_TOP_TO_CROP_TOP if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
+            "residual_vertical_stabilization": "prohibited" if calibration.sprocket_detector_mode == DETECTOR_MODE else "configured_separately",
         },
         "vertical_stabilization": {
             "enabled": calibration.vertical_stabilization.enabled,

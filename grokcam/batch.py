@@ -20,11 +20,13 @@ from .encoding import (concatenate_segments, encode_segment, file_sha256,
                        verify_video)
 from .image_processing import registered_frame
 from .manifest import atomic_json, load_or_create, record_segment, utc_now
+from .models import SprocketDetection
 from .normalization import normalize_frames
+from .precision_registration import register_precisely
 from .raw_development import DarktableMatchedDeveloper
 from .registration import crop_for_detection
 from .resume import completed_frame_numbers, contiguous_batches
-from .sprocket_detection import detect, validate_batch, validate_batch_with_physical
+from .sprocket_detection import detect, validate_batch
 from .timing import timed
 from .vertical_stabilization import (measure_frame, measurement_details,
                                      resolve_batch, verify_post_crop)
@@ -72,7 +74,9 @@ def select_dngs(options: RunOptions) -> list[Path]:
 
 def remaining_batches(dngs: list[Path], manifest: dict, batch_frames: int) -> tuple[list[dict], list[list[Path]]]:
     completed_segments = [item for item in manifest["segments"]
-                          if item.get("verified") and Path(item["video"]).exists()]
+                          if item.get("verified") and
+                          (item.get("excluded_only_segment") is True or
+                           (item.get("video") and Path(item["video"]).exists()))]
     completed = completed_frame_numbers(completed_segments)
     remaining = [path for path in dngs if frame_number(path) not in completed]
     return completed_segments, contiguous_batches(remaining, frame_number, batch_frames)
@@ -82,15 +86,20 @@ def finalize_if_complete(options: RunOptions, dngs: list[Path], manifest: dict,
                          manifest_path: Path, segments_dir: Path) -> Path | None:
     numbers = [frame_number(path) for path in dngs]
     ordered = sorted([item for item in manifest["segments"]
-                      if item.get("verified") and Path(item["video"]).exists()],
+                      if item.get("verified") and
+                      (item.get("excluded_only_segment") is True or
+                       (item.get("video") and Path(item["video"]).exists()))],
                      key=lambda item: item["first"])
     covered = [number for item in ordered for number in range(item["first"], item["last"] + 1)]
     if covered != numbers:
         return None
-    segment_paths = [Path(item["video"]) for item in ordered]
+    segment_paths = [Path(item["video"]) for item in ordered if item.get("video")]
+    if not segment_paths:
+        raise RuntimeError("All selected source frames were excluded; no movie can be encoded")
     concat = options.output_dir / "segments.txt"
     final = options.output_dir / f"RAW_review_{numbers[0]:06d}_{numbers[-1]:06d}_{options.fps}fps.mp4"
     temporary = final.with_suffix(".tmp.mp4")
+    finalization_started = time.perf_counter()
     concatenate_segments(options.ffmpeg, concat, segment_paths, temporary)
     encoded_frames = sum(int(item.get("frames", 0)) for item in ordered)
     verification = verify_video(options.ffmpeg, options.ffprobe, temporary, encoded_frames)
@@ -119,6 +128,68 @@ def finalize_if_complete(options: RunOptions, dngs: list[Path], manifest: dict,
                                  "excluded_frames": len(excluded), "encoded_frames": encoded_frames,
                                  "invariants_valid": (len(records) == encoded_frames + len(excluded))}
     manifest["exclusion_runs"] = runs
+    stage_totals: dict[str, float] = defaultdict(float)
+    count_totals: dict[str, int] = defaultdict(int)
+    for item in ordered:
+        for key, value in item.get("stage_timings_seconds", {}).items():
+            stage_totals[key] += float(value)
+        for key, value in item.get("registration_counts", {}).items():
+            count_totals[key] += int(value)
+    stage_totals["final_concatenation_verification"] += time.perf_counter() - finalization_started
+    manifest["processing_summary"] = {
+        "total_input_frames": len(records),
+        "p15_registrations": count_totals["p15_successes"],
+        "p07_fallback_attempts": count_totals["p07_attempts"],
+        "p07_fallback_successes": count_totals["p07_successes"],
+        "p07_failures": count_totals["p07_failures"],
+        "primary_p15_attempts": count_totals["primary_p15_attempts"],
+        "primary_p15_successes": count_totals["primary_p15_successes"],
+        "p24_branch_entries": count_totals["p24_attempts"],
+        "p24_capture_pairs_available": count_totals["p24_capture_pairs_available"],
+        "p24_capture_geometry_passes": count_totals["p24_capture_geometry_passes"],
+        "p24_physical_corroborator_available": count_totals["p24_physical_corroborator_available"],
+        "p24_corroborated_gate_passes": count_totals["p24_corroborated_gate_passes"],
+        "p24_guided_p15_attempts": count_totals["p24_guided_p15_attempts"],
+        "p24_guided_p15_successes": count_totals["p24_guided_p15_successes"],
+        "p24_guided_p15_failures": count_totals["p24_guided_p15_failures"],
+        "p22_invocations": count_totals["p22_invocations"],
+        "registration_source_counts": {
+            "primary_p15": count_totals["primary_p15_successes"],
+            "p24_capture_p15": count_totals["p24_guided_p15_successes"],
+            "p07_p22": count_totals["p07_successes"],
+            "excluded": len(excluded)},
+        "excluded_frames": len(excluded), "encoded_frames": encoded_frames,
+        "consecutive_exclusion_runs": [{"first": run["first"], "last": run["last"],
+                                         "length": run["length"]} for run in runs],
+        "stage_total_seconds": dict(stage_totals),
+        "registration_timing": {
+            "p15": {"attempts": count_totals["p15_attempts"],
+                    "successes": count_totals["p15_successes"],
+                    "total_seconds": stage_totals["p15_measurement"],
+                    "mean_seconds_per_attempt": (stage_totals["p15_measurement"] / count_totals["p15_attempts"]
+                                                 if count_totals["p15_attempts"] else 0)},
+            "p07": {"invocations": count_totals["p07_attempts"],
+                    "total_seconds": stage_totals["p07_fallback_detection"],
+                    "mean_seconds_per_invocation": (stage_totals["p07_fallback_detection"] / count_totals["p07_attempts"]
+                                                    if count_totals["p07_attempts"] else 0)},
+            "p22": {"invocations": count_totals["p22_invocations"],
+                    "total_seconds": stage_totals["p22_refinement"],
+                    "mean_seconds_per_invocation": (stage_totals["p22_refinement"] / count_totals["p22_invocations"]
+                                                    if count_totals["p22_invocations"] else 0)},
+            "primary_p15": {"calls": count_totals["primary_p15_attempts"],
+                "total_seconds": stage_totals["primary_p15_measurement"],
+                "mean_seconds_per_call": stage_totals["primary_p15_measurement"] / count_totals["primary_p15_attempts"] if count_totals["primary_p15_attempts"] else 0},
+            "p24_capture_gate": {"calls": count_totals["p24_attempts"],
+                "total_seconds": stage_totals["p24_capture_transform_gate"],
+                "mean_seconds_per_call": stage_totals["p24_capture_transform_gate"] / count_totals["p24_attempts"] if count_totals["p24_attempts"] else 0},
+            "p24_physical_corroboration": {"calls": count_totals["p24_capture_geometry_passes"],
+                "total_seconds": stage_totals["p24_physical_hole_corroboration"],
+                "mean_seconds_per_call": stage_totals["p24_physical_hole_corroboration"] / count_totals["p24_capture_geometry_passes"] if count_totals["p24_capture_geometry_passes"] else 0},
+            "p24_guided_p15": {"calls": count_totals["p24_guided_p15_attempts"],
+                "total_seconds": stage_totals["p24_guided_p15_measurement"],
+                "mean_seconds_per_call": stage_totals["p24_guided_p15_measurement"] / count_totals["p24_guided_p15_attempts"] if count_totals["p24_guided_p15_attempts"] else 0},
+        },
+    }
     for path in segment_paths:
         path.unlink(missing_ok=True)
     concat.unlink(missing_ok=True)
@@ -141,6 +212,9 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
     raw_dir = options.raw_dir.expanduser().resolve()
     output_dir = options.output_dir.expanduser().resolve()
     options = RunOptions(**{**options.__dict__, "raw_dir": raw_dir, "output_dir": output_dir})
+    if (calibration.sprocket_detector_mode == "physical-p07-v1" and
+            calibration.vertical_stabilization.enabled):
+        raise SystemExit("physical-p07-v1 uses frozen P15/P07/P22 registration and cannot enable residual vertical stabilization")
     output_dir.mkdir(parents=True, exist_ok=True)
     lock_handle = (output_dir / ".pipeline.lock").open("w")
     try:
@@ -181,6 +255,7 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
         capture_metadata = load_capture_metadata(raw_dir)
     for batch_index, batch in enumerate(batches, start=1):
         timings: dict[str, float] = defaultdict(float)
+        registration_counts: dict[str, int] = defaultdict(int)
         first, last = frame_number(batch[0]), frame_number(batch[-1])
         free_gib = shutil.disk_usage(output_dir).free / 2**30
         if free_gib < options.minimum_free_gib:
@@ -199,7 +274,7 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
             developer.develop(path, target)
             return target
 
-        with timed("rawpy_develop", timings):
+        with timed("raw_development", timings):
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, options.jobs)) as pool:
                 futures = [pool.submit(convert, path) for path in batch]
                 for done, future in enumerate(concurrent.futures.as_completed(futures), start=1):
@@ -207,7 +282,7 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
                     if done == 1 or done % 25 == 0 or done == len(batch):
                         print(f"  developed {done}/{len(batch)}; free {shutil.disk_usage(output_dir).free/2**30:.1f} GiB", flush=True)
 
-        with timed("sprocket_detect", timings):
+        with timed("primary_roi_detection", timings):
             measured = []
             for dng in batch:
                 with Image.open(tiffs / f"{dng.stem}.tif") as image:
@@ -215,25 +290,35 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
                         measured.append(detect(image, calibration.detector))
                     except ValueError:
                         measured.append(None)
-            physical_details = [{} for _ in measured]
-            if calibration.sprocket_detector_mode == "physical-p07-v1":
-                paths = [tiffs / f"{dng.stem}.tif" for dng in batch]
-                detections, physical_details = validate_batch_with_physical(
-                    lambda index: Image.open(paths[index]), measured, calibration.detector,
-                    [capture_metadata.get(frame_number(dng)) for dng in batch],
-                )
-            else:
+        physical_details = [{} for _ in measured]
+        precise_results = None
+        if calibration.sprocket_detector_mode == "physical-p07-v1":
+            precise_results = []
+            for index, dng in enumerate(batch):
+                with Image.open(tiffs / f"{dng.stem}.tif") as image:
+                    result = register_precisely(
+                        image, measured[index], capture_metadata.get(frame_number(dng)),
+                        timings, registration_counts,
+                    )
+                precise_results.append(result)
+                physical_details[index] = result.diagnostics
+            detections = [None if result.crop is None else SprocketDetection(
+                float(result.anchor_x), float(result.optical_lower_top_y), None,
+                detector=result.source, detected=True, accepted=True, interpolated=False,
+            ) for result in precise_results]
+        else:
+            with timed("legacy_batch_validation", timings):
                 detections = validate_batch(measured, calibration.detector)
-            trusted = [item for item in detections if item is not None]
-            reference_x = float(np.median([item.cx for item in trusted])) if trusted else None
+        trusted = [item for item in detections if item is not None]
+        reference_x = float(np.median([item.cx for item in trusted])) if trusted else None
 
         with timed("crop_register", timings):
             frame_records = []
             included = [(index, dng, detection) for index, (dng, detection) in
                         enumerate(zip(batch, detections)) if detection is not None]
-            if not included:
-                raise RuntimeError(f"No trustworthy registrations in source batch {first}-{last}")
-            primary_crops = [crop_for_detection(item[2], calibration.crop) for item in included]
+            primary_crops = ([precise_results[item[0]].crop for item in included]
+                             if precise_results is not None else
+                             [crop_for_detection(item[2], calibration.crop) for item in included])
             stabilization = None
             if calibration.vertical_stabilization.enabled:
                 residual_measured = []
@@ -259,7 +344,6 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
             encoded_before = sum(int(item.get("frames", 0)) for item in manifest["segments"])
             included_records = []
             included_position = {source_index: position for position, (source_index, _, _) in enumerate(included)}
-            excluded_dir = output_dir / "debug" / "excluded_frames"
             for index, (dng, detection) in enumerate(zip(batch, detections)):
                 if detection is None:
                     debug_path = preserve_excluded_tiff(tiffs / f"{dng.stem}.tif", output_dir)
@@ -272,7 +356,28 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
                         "vertical_stabilization_enabled": False,
                         "output_disposition": "excluded", "encoded_output_frame": None,
                         "debug_developed_image": str(debug_path),
+                        "raw_source_reference": str(dng.resolve()),
+                        "final_registration_source": None,
+                        "final_disposition": "excluded",
                     }
+                    if precise_results is not None:
+                        p15 = physical_details[index].get("p15", {})
+                        p07 = physical_details[index].get("p07", {})
+                        record.update({
+                            "exclusion_reason": p07.get("classification", "p07_rejected"),
+                            "p15_failure_reason": p15.get("reason"),
+                            "p15_measurements": p15,
+                            "p07_rejection_reason": p07.get("classification"),
+                            "p07_best_candidate_coordinates": {
+                                "upper_center": p07.get("upper_center"),
+                                "lower_center": p07.get("lower_center")},
+                            "p07_best_score": p07.get("joint_score"),
+                            "p07_competitor_score": p07.get("competitor_score"),
+                            "p07_competitor_margin": p07.get("competitor_margin"),
+                            "p07_supported": p07.get("supported"),
+                            "p07_missing": p07.get("missing"),
+                            "p07_contradicted": p07.get("contradicted"),
+                        })
                     record.update(physical_details[index])
                     frame_records.append(record)
                     continue
@@ -293,7 +398,12 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
                     "crop_left": crop.left, "crop_top": crop.top,
                     "vertical_stabilization_enabled": result is not None,
                     "output_disposition": "included", "encoded_output_frame": encoded_number,
+                    "final_registration_source": detection.detector,
                 }
+                if precise_results is not None:
+                    registration = precise_results[index]
+                    record.update({"optical_lower_top_y": registration.optical_lower_top_y,
+                                   "registration_diagnostics": registration.diagnostics})
                 record.update(physical_details[index])
                 if result is not None:
                     record.update(result.diagnostics)
@@ -307,30 +417,46 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
                 included_records.append(record)
         shutil.rmtree(tiffs)
 
-        registered_paths = sorted(registered.glob("frame_*.jpg"), key=frame_number)
-        with timed("normalize", timings):
-            corrections, target = normalize_frames(
-                registered_paths, normalized, manifest["normalization"].get("target_median_luma"))
-            if "target_median_luma" not in manifest["normalization"]:
-                manifest["normalization"]["target_median_luma"] = target
-            for record, correction in zip(included_records, corrections):
-                record["normalization"] = correction
+        video = None
+        verification = {"excluded_only_segment": True}
+        if included:
+            registered_paths = sorted(registered.glob("frame_*.jpg"), key=frame_number)
+            with timed("normalization", timings):
+                corrections, target = normalize_frames(
+                    registered_paths, normalized, manifest["normalization"].get("target_median_luma"))
+                if "target_median_luma" not in manifest["normalization"]:
+                    manifest["normalization"]["target_median_luma"] = target
+                for record, correction in zip(included_records, corrections):
+                    record["normalization"] = correction
 
-        with timed("ffmpeg_encode", timings):
-            video = segments_dir / f"frames_{first:06d}_{last:06d}_16fps.mp4"
-            temporary_video = video.with_suffix(".tmp.mp4")
-            encode_segment(options.ffmpeg, normalized, temporary_video,
-                           encoded_before + 1, len(included), options.fps)
-        verification = verify_video(options.ffmpeg, options.ffprobe, temporary_video, len(included))
-        os.replace(temporary_video, video)
+            with timed("encoding_output", timings):
+                video = segments_dir / f"frames_{first:06d}_{last:06d}_16fps.mp4"
+                temporary_video = video.with_suffix(".tmp.mp4")
+                encode_segment(options.ffmpeg, normalized, temporary_video,
+                               encoded_before + 1, len(included), options.fps)
+            verification = verify_video(options.ffmpeg, options.ffprobe,
+                                        temporary_video, len(included))
+            os.replace(temporary_video, video)
+        for key in ("frames","primary_p15_attempts","primary_p15_successes","p24_attempts",
+                    "p24_capture_pairs_available","p24_capture_geometry_passes",
+                    "p24_physical_corroborator_available","p24_corroborated_gate_passes",
+                    "p24_guided_p15_attempts","p24_guided_p15_successes",
+                    "p24_guided_p15_failures","p07_attempts","p07_successes",
+                    "p07_failures","p22_invocations","excluded_frames"):
+            registration_counts[key] += 0
         segment = {"first": first, "last": last, "frames": len(included),
-                   "source_frames": len(batch), "excluded": len(batch) - len(included), "video": str(video),
-                   "video_bytes": video.stat().st_size, "video_sha256": file_sha256(video),
+                   "source_frames": len(batch), "excluded": len(batch) - len(included),
+                   "video": None if video is None else str(video),
+                   "video_bytes": 0 if video is None else video.stat().st_size,
+                   "video_sha256": None if video is None else file_sha256(video),
+                   "excluded_only_segment": video is None,
                    "verified": True, "verification": verification, "reference_sprocket_x": reference_x,
                    "detected": sum(item.detected for item in trusted),
                    "accepted": len(trusted), "interpolated": 0,
                    "elapsed_seconds": round(time.time() - started, 2),
-                   "completed": utc_now(), "frame_records": frame_records}
+                   "completed": utc_now(), "frame_records": frame_records,
+                   "stage_timings_seconds": dict(timings),
+                   "registration_counts": dict(registration_counts)}
         record_segment(manifest_path, manifest, segment)
 
         total = sum(timings.values())
@@ -338,9 +464,33 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
         for stage, seconds in sorted(timings.items(), key=lambda item: -item[1]):
             percent = 100 * seconds / total if total else 0
             print(f"    {stage:20s}  {seconds:7.1f}s  ({percent:5.1f}%)")
+        if calibration.sprocket_detector_mode == "physical-p07-v1":
+            for stage, count_key in (("primary_p15_measurement", "primary_p15_attempts"),
+                                     ("p24_capture_transform_gate", "p24_attempts"),
+                                     ("p24_physical_hole_corroboration", "p24_capture_geometry_passes"),
+                                     ("p24_guided_p15_measurement", "p24_guided_p15_attempts"),
+                                     ("p07_fallback_detection", "p07_attempts"),
+                                     ("p22_refinement", "p22_invocations")):
+                count = registration_counts[count_key]; seconds = timings[stage]
+                print(f"    {stage:20s}  calls={count:5d}  mean={seconds/count if count else 0:.4f}s")
+            print("    registration counts  " + ", ".join(
+                f"{key}={registration_counts[key]}" for key in
+                ("primary_p15_attempts", "primary_p15_successes", "p24_attempts",
+                 "p24_capture_pairs_available", "p24_capture_geometry_passes",
+                 "p24_physical_corroborator_available", "p24_corroborated_gate_passes",
+                 "p24_guided_p15_attempts", "p24_guided_p15_successes",
+                 "p24_guided_p15_failures", "p07_attempts", "p07_successes",
+                 "p07_failures", "p22_invocations", "excluded_frames")))
         shutil.rmtree(work)
         print(f"  verified and cleaned segment {first:06d}-{last:06d}; free {shutil.disk_usage(output_dir).free/2**30:.1f} GiB", flush=True)
 
     final = finalize_if_complete(options, dngs, manifest, manifest_path, segments_dir)
     if final is not None:
         print(f"Complete and verified: {final}", flush=True)
+        summary = manifest.get("processing_summary", {})
+        print("Registration summary: " + ", ".join(
+            f"{key}={summary.get(key, 0)}" for key in
+            ("total_input_frames", "p15_registrations", "p07_fallback_attempts",
+             "p07_fallback_successes", "p07_failures", "excluded_frames", "encoded_frames")),
+            flush=True)
+        print(f"Consecutive exclusion runs: {summary.get('consecutive_exclusion_runs', [])}", flush=True)

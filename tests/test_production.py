@@ -12,8 +12,8 @@ from PIL import Image
 
 from grokcam.config import (DEFAULT_MATCH_REPORT, DetectorCalibration,
                             VerticalStabilizationCalibration, load_calibration)
-from grokcam.batch import (RunOptions, finalize_if_complete, preserve_excluded_tiff,
-                           remaining_batches)
+from grokcam.batch import (RunOptions, finalize_if_complete, frame_number,
+                           preserve_excluded_tiff, remaining_batches)
 from grokcam.manifest import PIPELINE_ID, load_or_create
 from grokcam.models import SprocketDetection
 from grokcam.raw_development import apply_match, load_match_report
@@ -44,6 +44,9 @@ class ProductionTests(unittest.TestCase):
 
     def test_vertical_stabilization_is_disabled_by_default(self):
         self.assertFalse(load_calibration().vertical_stabilization.enabled)
+
+    def test_promoted_precision_registration_is_default(self):
+        self.assertEqual(load_calibration().sprocket_detector_mode, DETECTOR_MODE)
 
     def test_vertical_calibration_override_is_explicit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -253,6 +256,15 @@ class ProductionTests(unittest.TestCase):
         batches = contiguous_batches(paths, number, 2)
         self.assertEqual([[number(p) for p in b] for b in batches], [[1, 2], [4, 5], [6]])
 
+    def test_excluded_only_batch_is_complete_and_next_batch_continues(self):
+        dngs = [Path(f"frame_{number:06d}.dng") for number in (1, 2, 3)]
+        manifest = {"segments": [{"first": 1, "last": 2, "frames": 0,
+                                   "excluded": 2, "excluded_only_segment": True,
+                                   "video": None, "verified": True}]}
+        completed, batches = remaining_batches(dngs, manifest, 2)
+        self.assertEqual([(item["first"], item["last"]) for item in completed], [(1, 2)])
+        self.assertEqual([[frame_number(path) for path in batch] for batch in batches], [[3]])
+
     def test_segment_plan_preserves_only_verified_existing_video(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -287,13 +299,20 @@ class ProductionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "processing_manifest.json"
             physical = replace(load_calibration(), sprocket_detector_mode=DETECTOR_MODE)
+            legacy = replace(load_calibration(), sprocket_detector_mode="legacy")
             with patch("grokcam.manifest.tool_version", return_value="ffmpeg test"):
                 manifest = load_or_create(path, Path("/archive/raw"), [1], 16, 1,
                                           physical, Path("ffmpeg"))
                 self.assertEqual(manifest["sprocket_registration"]["mode"], DETECTOR_MODE)
+                registration=manifest["sprocket_registration"]
+                self.assertEqual(registration["p24_capture_y_bias"],14.5)
+                self.assertEqual(registration["p24_physical_y_bias"],23.0)
+                self.assertEqual(registration["p25_capture_x_bias"],1.3344210526315692)
+                self.assertEqual(registration["p24_frozen_gate"]["height_difference_min"],20.0)
+                self.assertEqual(registration["p24_frozen_gate"]["physical_score_max"],.30)
                 with self.assertRaisesRegex(RuntimeError, "different sprocket detector"):
                     load_or_create(path, Path("/archive/raw"), [1], 16, 1,
-                                   load_calibration(), Path("ffmpeg"))
+                                   legacy, Path("ffmpeg"))
                 manifest["sprocket_registration"]["production_module_sha256"] = "wrong"
                 path.write_text(json.dumps(manifest), encoding="utf-8")
                 with self.assertRaisesRegex(RuntimeError, "production module hash"):
@@ -345,7 +364,15 @@ class ProductionTests(unittest.TestCase):
             ]
             manifest = {"segments": [{"first": 1, "last": 4, "frames": 2,
                                        "video": str(video), "verified": True,
-                                       "frame_records": records}]}
+                                       "frame_records": records,
+                                       "registration_counts": {
+                                           "p15_attempts": 4, "p15_successes": 2,
+                                           "p07_attempts": 2, "p07_successes": 0,
+                                           "p07_failures": 2, "p22_invocations": 0},
+                                       "stage_timings_seconds": {
+                                           "p15_measurement": .4,
+                                           "p07_fallback_detection": 3.0,
+                                           "p22_refinement": 0.0}}]}
             dngs = [root / f"frame_{n:06d}.dng" for n in range(1, 5)]
             options = RunOptions(root, root, fps=16)
             def fake_concat(_ffmpeg, _concat, _paths, temporary): temporary.write_bytes(b"joined")
@@ -359,6 +386,13 @@ class ProductionTests(unittest.TestCase):
             self.assertEqual((run["first"], run["last"], run["length"]), (2, 3, 2))
             self.assertEqual(run["duration_seconds"], .125)
             self.assertEqual((run["preceding_trusted_frame"], run["following_trusted_frame"]), (1, 4))
+            summary = manifest["processing_summary"]
+            self.assertEqual((summary["total_input_frames"], summary["p15_registrations"],
+                              summary["p07_fallback_attempts"], summary["p07_failures"],
+                              summary["excluded_frames"], summary["encoded_frames"]),
+                             (4, 2, 2, 2, 2, 2))
+            self.assertEqual(summary["registration_timing"]["p15"]["mean_seconds_per_attempt"], .1)
+            self.assertEqual(summary["registration_timing"]["p07"]["mean_seconds_per_invocation"], 1.5)
 
     def test_match_report_and_transform(self):
         report_path = DEFAULT_MATCH_REPORT
