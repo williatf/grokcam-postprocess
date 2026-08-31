@@ -16,8 +16,6 @@ from grokcam.precision_registration import (
     evaluate_p24_guide, measure_p15_lower_top, refine_p22_common_y,
     register_precisely,
 )
-from research.p14_detector_guided_edge_registration import measure_frame
-from research.p22_refine_frozen_p07_y import refine
 
 
 class PrecisionRegistrationPolicyTests(unittest.TestCase):
@@ -156,31 +154,26 @@ class PrecisionRegistrationPolicyTests(unittest.TestCase):
         self.assertEqual(result.diagnostics["p07"]["upper_center"], [400, 440])
         self.assertEqual(self.counts["p07_failures"], 1)
 
-    def test_production_p15_is_equivalent_to_frozen_measurement(self):
+    def test_production_p15_frozen_deterministic_fixture(self):
         rng = np.random.default_rng(8)
         image = Image.fromarray(rng.integers(0, 256, (1520, 2028, 3), dtype=np.uint8))
         production = measure_p15_lower_top(image, 410.0, 850.0)
-        frozen = measure_frame(image, 410.0, 850.0, {
-            "search_radius_px": 8, "horizontal_half_fraction": .30, "column_step": 2,
-            "minimum_peak": 20, "minimum_prominence": 8, "minimum_noise": 2,
-            "minimum_snr": 2.5, "subpixel_min_curvature": 1.0,
-            "subpixel_max_fraction": .75, "minimum_inlier_columns": 24,
-            "minimum_inlier_fraction": .20, "minimum_outlier_limit_px": 1.0,
-            "outlier_mad_multiplier": 3.0,
-        })["lower_top"]
-        self.assertEqual(production, frozen)
+        self.assertTrue(production["valid"])
+        self.assertAlmostEqual(production["y"], 1107.2221064987973)
+        self.assertEqual(production["valid_columns"], 44)
+        self.assertAlmostEqual(production["valid_fraction"], 0.3826086956521739)
 
-    def test_production_p22_is_equivalent_and_only_returns_y_shift(self):
+    def test_production_p22_frozen_deterministic_fixture_and_only_y_shift(self):
         rng = np.random.default_rng(9)
         image = Image.fromarray(rng.integers(0, 256, (1520, 2028, 3), dtype=np.uint8))
         args = (image, 410.0, 450.0, [(410.0, 450.0)])
         production = refine_p22_common_y(*args)
-        frozen = refine(*args)
-        self.assertEqual(production[0], frozen[0])
-        for key in ("local_score", "local_raw_score", "local_prior_distance",
-                    "local_score_margin_1px", "maximum_tie_count",
-                    "search_boundary_hit", "score_range", "candidates_json"):
-            self.assertEqual(production[1][key], frozen[1][key])
+        self.assertEqual(production[0], 1.25)
+        expected={"local_score":2.9596792996013455,"local_raw_score":2.9598042996013456,
+                  "local_prior_distance":1.25,"local_score_margin_1px":0.11474275258016409,
+                  "maximum_tie_count":1,"search_boundary_hit":False,
+                  "score_range":2.6482894503710526}
+        for key,value in expected.items(): self.assertEqual(production[1][key],value)
 
     @patch("grokcam.precision_registration.run_forced_p07")
     @patch("grokcam.precision_registration.measure_p15_lower_top")

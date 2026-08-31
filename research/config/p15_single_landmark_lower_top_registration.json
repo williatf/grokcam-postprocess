@@ -1,8 +1,0 @@
-{
-  "version": "p15-lower-top-registration-v1",
-  "p14_measurement_config": "research/config/p14_detector_guided_edge_registration.json",
-  "crop_top_minus_lower_top_y": -673.5297914597816,
-  "calibration_population": "Reel_46335 frames 2000-2350; trusted source primary; frozen P14 lower_top_valid",
-  "calibration_frame_count": 241,
-  "calibration_median_absolute_deviation_px": 0.34695679196670426
-}

@@ -1,7 +1,0 @@
-{
-  "reference_config": "p07_joint_rigid_sprocket_pair_evidence_blue_frozen.json",
-  "reference_config_sha256": "334abf89ee43a0eb18c7f33e68eb8afb9f38556ff981136ac16f5d30b646a1c6",
-  "optimization": "exact candidate-result memoization across unchanged coarse and fine phases",
-  "cache_key": ["upper_x", "upper_y", "full_evidence_mode"],
-  "approximate_reuse": false
-}

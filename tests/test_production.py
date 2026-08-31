@@ -244,11 +244,15 @@ class ProductionTests(unittest.TestCase):
         self.assertEqual(output.size, (1133, 900))
         self.assertEqual(sample.call_count, 1)
 
-    def test_production_p07_is_exact_to_cached_oracle_on_same_input(self):
-        from research.p07_exact_cached_candidate_poc import fit_pair_cached
+    def test_production_p07_frozen_deterministic_fixture(self):
         image = np.random.default_rng(7).integers(0, 256, (1520, 2028, 3), dtype=np.uint8)
-        oracle = fit_pair_cached(image, [], [], None, FROZEN_CONFIG)
-        self.assertEqual(fit_pair(image), oracle)
+        result=fit_pair(image)
+        expected={"safe":False,"upper_x":532.0,"upper_y":166.0,
+                  "lower_x":550.6789473684211,"lower_y":951.0,
+                  "score":3.948809752844725,"margin":-0.2575345520759651,
+                  "supported":8,"contradicted":0,"geometric_residual":12,
+                  "pair_contrast":90.0}
+        for key,value in expected.items(): self.assertEqual(result[key],value)
 
     def test_resume_batches_do_not_bridge_gaps(self):
         paths = [Path(f"frame_{n:06d}.dng") for n in (1, 2, 4, 5, 6)]
