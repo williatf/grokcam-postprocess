@@ -185,7 +185,7 @@ reel:
 ```bash
 /home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
   /mnt/GrokCam/projects/RAW_Test/raw \
-  /home/todd/telecine/grokcam-postprocess/work/reel-smoke-test \
+  /home/todd/telecine/grokcam-postprocess/work/regular8/reel-smoke-test \
   --first 120 \
   --last 123 \
   --batch-frames 4 \
@@ -943,8 +943,8 @@ explicit review directory.
 ```bash
 /home/todd/telecine/.venv/bin/python -m tools.calibrate_sprocket_white \
   --raw-dir /mnt/GrokCam/projects/RAW_Test/raw \
-  --work-dir work/sprocket-white-calibration \
-  --output-dir work/sprocket-white-candidate
+  --work-dir work/regular8/sprocket-white-calibration \
+  --output-dir work/regular8/sprocket-white-candidate
 ```
 
 Supported options are `--raw-dir`, `--work-dir`, and `--output-dir`. The v1
@@ -956,9 +956,9 @@ sprocket reader assumes the documented 2028×1520 packed 12-bit BGGR layout.
 /home/todd/telecine/.venv/bin/python -m tools.calibrate_darktable_match \
   --raw-dir /mnt/GrokCam/projects/RAW_Test/raw \
   --darktable /usr/bin/darktable-cli \
-  --wb-report work/sprocket-white-candidate/poc-report.json \
-  --work-dir work/darktable-match-calibration \
-  --output work/darktable-match-candidate.json \
+  --wb-report work/regular8/sprocket-white-candidate/poc-report.json \
+  --work-dir work/regular8/darktable-match-calibration \
+  --output work/regular8/darktable-match-candidate.json \
   --calibration-id grokcam-darktable-match-candidate-YYYYMMDD \
   --jobs 3
 ```
@@ -977,7 +977,7 @@ the production artifact.
 ```bash
 /home/todd/telecine/.venv/bin/python -m tools.compare_darktable_calibrations \
   calibrations/darktable_match_v1.json \
-  work/darktable-match-candidate.json \
+  work/regular8/darktable-match-candidate.json \
   --require-exact-fit
 ```
 
@@ -1013,8 +1013,8 @@ checks a new manifest against the reference:
 
 ```bash
 /home/todd/telecine/.venv/bin/python -m grokcam.cli.compare_reference \
-  work/matched-timed-proof/processing_manifest.json \
-  work/new-proof/processing_manifest.json
+  work/regular8/matched-timed-proof/processing_manifest.json \
+  work/regular8/new-proof/processing_manifest.json
 ```
 
 This protects geometry, detector decisions, crop registration, learned RAW

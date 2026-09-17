@@ -104,11 +104,11 @@ global calibration exactly; it is not authorization to tune the algorithms.
 
 ## Artifacts
 
-- `work/Reel_P23_independent_validation/summary.json` — complete metrics, frozen declaration, fallback record, and flagged rows
-- `work/Reel_P23_independent_validation/measurements.csv` — all 450 frame-level outputs
-- `work/Reel_P23_independent_validation/audit/` — tail, fallback, tie, and unusual-shift overlays
-- `work/Reel_P23_independent_validation/reel46335_3000_3149_p15_first_p22_fallback_16fps.mp4`
-- `work/Reel_P23_independent_validation/reel28486_3000_3149_p15_first_p22_fallback_16fps.mp4`
-- `work/Reel_P23_independent_validation/blue_reel_3000_3149_p15_first_p22_fallback_16fps.mp4`
+- `work/regular8/Reel_P23_independent_validation/summary.json` — complete metrics, frozen declaration, fallback record, and flagged rows
+- `work/regular8/Reel_P23_independent_validation/measurements.csv` — all 450 frame-level outputs
+- `work/regular8/Reel_P23_independent_validation/audit/` — tail, fallback, tie, and unusual-shift overlays
+- `work/regular8/Reel_P23_independent_validation/reel46335_3000_3149_p15_first_p22_fallback_16fps.mp4`
+- `work/regular8/Reel_P23_independent_validation/reel28486_3000_3149_p15_first_p22_fallback_16fps.mp4`
+- `work/regular8/Reel_P23_independent_validation/blue_reel_3000_3149_p15_first_p22_fallback_16fps.mp4`
 
 All movies were verified as 150 frames, 1134×900, 16 fps, 9.375 seconds. Their SHA-256 hashes are recorded in `summary.json`.

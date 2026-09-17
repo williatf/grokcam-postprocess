@@ -86,8 +86,8 @@ report from the sprocket illumination:
 ```bash
 /home/todd/telecine/.venv/bin/python -m tools.calibrate_sprocket_white \
   --raw-dir /mnt/GrokCam/projects/RAW_Test/raw \
-  --work-dir work/sprocket-white-calibration \
-  --output-dir work/sprocket-white-candidate
+  --work-dir work/regular8/sprocket-white-calibration \
+  --output-dir work/regular8/sprocket-white-candidate
 ```
 
 Then fit a new Darktable-match candidate:
@@ -96,9 +96,9 @@ Then fit a new Darktable-match candidate:
 /home/todd/telecine/.venv/bin/python -m tools.calibrate_darktable_match \
   --raw-dir /mnt/GrokCam/projects/RAW_Test/raw \
   --darktable /usr/bin/darktable-cli \
-  --wb-report work/sprocket-white-candidate/poc-report.json \
-  --work-dir work/darktable-match-calibration \
-  --output work/darktable-match-candidate.json \
+  --wb-report work/regular8/sprocket-white-candidate/poc-report.json \
+  --work-dir work/regular8/darktable-match-calibration \
+  --output work/regular8/darktable-match-candidate.json \
   --calibration-id grokcam-darktable-match-candidate-YYYYMMDD \
   --jobs 3
 ```
@@ -111,7 +111,7 @@ Compare learned values with the golden artifact:
 ```bash
 /home/todd/telecine/.venv/bin/python -m tools.compare_darktable_calibrations \
   calibrations/darktable_match_v1.json \
-  work/darktable-match-candidate.json \
+  work/regular8/darktable-match-candidate.json \
   --require-exact-fit
 ```
 

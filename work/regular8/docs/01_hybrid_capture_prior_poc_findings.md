@@ -12,7 +12,7 @@ No production source, configuration, calibration, DNG, manifest, or existing out
 
 ## POC architecture
 
-The isolated implementation is [p01_hybrid_capture_prior_poc.py](../research/p01_hybrid_capture_prior_poc.py), with focused safety tests in [test_p01_hybrid_capture_prior_poc.py](../research/test_p01_hybrid_capture_prior_poc.py).
+The isolated implementation is [p01_hybrid_capture_prior_poc.py](../../../research/p01_hybrid_capture_prior_poc.py), with focused safety tests in [test_p01_hybrid_capture_prior_poc.py](../../../research/test_p01_hybrid_capture_prior_poc.py).
 
 For each reel it:
 

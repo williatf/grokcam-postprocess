@@ -47,9 +47,9 @@ must not be interpreted as validation of those 67 registers.
 
 ## Artifacts
 
-- `work/Reel_46335_p18_full_range_2000_2350_20260829/Reel_46335_002000_002350_p18_register_16fps.mp4`
-- `work/Reel_46335_p18_full_range_2000_2350_20260829/measurements.csv`
-- `work/Reel_46335_p18_full_range_2000_2350_20260829/summary.json`
+- `work/regular8/Reel_46335_p18_full_range_2000_2350_20260829/Reel_46335_002000_002350_p18_register_16fps.mp4`
+- `work/regular8/Reel_46335_p18_full_range_2000_2350_20260829/measurements.csv`
+- `work/regular8/Reel_46335_p18_full_range_2000_2350_20260829/summary.json`
 - `research/p18_full_range_render.py`
 
 Movie SHA-256:

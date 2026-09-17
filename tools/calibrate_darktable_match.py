@@ -119,7 +119,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--darktable", type=Path, default=Path("darktable-cli"))
     parser.add_argument("--output", type=Path, required=True,
                         help="new candidate JSON; production is never updated")
-    parser.add_argument("--work-dir", type=Path, default=Path("work/darktable-match-calibration"))
+    parser.add_argument("--work-dir", type=Path, default=Path("work/regular8/darktable-match-calibration"))
     parser.add_argument("--calibration-id", required=True)
     parser.add_argument("--jobs", type=int, default=3)
     parser.add_argument("--wb-report", type=Path,

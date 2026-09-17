@@ -48,6 +48,6 @@ the photographed scenes. Frame 1598 needs a gentler grade, while 2798 and 3398
 show that the strong grade should not be applied universally.
 
 The verified review package currently resides in
-`work/residual-cast-poc/review`. Copying it to the designated retained mount was
+`work/regular8/residual-cast-poc/review`. Copying it to the designated retained mount was
 blocked by the environment's elevated-action usage quota; no workaround or
 source mutation was attempted.

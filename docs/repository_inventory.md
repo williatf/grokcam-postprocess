@@ -55,7 +55,7 @@ calibration dependency.
 - `README.md`: current production workflow and canonical command.
 - `docs/calibration.md`: frozen inference and offline recalibration.
 - `docs/processing_history.md`: concise architectural and algorithm history.
-- `docs/*_findings.md`: retained research conclusions.
+- `work/regular8/docs/*_findings.md`: retained Regular 8 research conclusions.
 - `docs/GrokCam_RAW_postprocessing_guide.md`: comprehensive production-v1 user
   and technical operations guide.
 

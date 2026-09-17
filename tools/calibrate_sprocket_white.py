@@ -103,7 +103,7 @@ def contact(paths,out):
  for i,im in enumerate(ims):c.paste(im,(0,i*385))
  c.save(out,quality=92)
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--raw-dir',type=Path,default=Path('/mnt/GrokCam/projects/RAW_Test/raw'));ap.add_argument('--work-dir',type=Path,default=Path('work/sprocket-white-poc'));ap.add_argument('--output-dir',type=Path,default=Path('/mnt/GrokCam/projects/RAW_Test/outputs/sprocket-white-poc'));a=ap.parse_args();a.work_dir=a.work_dir.resolve();a.output_dir=a.output_dir.resolve()
+ ap=argparse.ArgumentParser();ap.add_argument('--raw-dir',type=Path,default=Path('/mnt/GrokCam/projects/RAW_Test/raw'));ap.add_argument('--work-dir',type=Path,default=Path('work/regular8/sprocket-white-poc'));ap.add_argument('--output-dir',type=Path,default=Path('/mnt/GrokCam/projects/RAW_Test/outputs/sprocket-white-poc'));a=ap.parse_args();a.work_dir=a.work_dir.resolve();a.output_dir=a.output_dir.resolve()
  for p in (a.work_dir,a.output_dir):p.mkdir(parents=True,exist_ok=True)
  for n in ('overlays','sprocket-crops','raw-visualizations','comparisons'): (a.output_dir/n).mkdir(exist_ok=True)
  cache=a.work_dir/'cache';(cache/'gmic').mkdir(parents=True,exist_ok=True);env=os.environ.copy();env['XDG_CACHE_HOME']=str(cache)

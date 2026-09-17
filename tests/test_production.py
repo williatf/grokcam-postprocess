@@ -416,7 +416,7 @@ class ProductionTests(unittest.TestCase):
                          [1.06982421875, 1.0, 1.0991804599761963, 1.0])
 
     def test_golden_manifest_comparison(self):
-        reference = Path("work/matched-timed-proof/processing_manifest.json")
+        reference = Path("work/regular8/matched-timed-proof/processing_manifest.json")
         if not reference.exists():
             self.skipTest("checked proof manifest is unavailable")
         data = json.loads(reference.read_text(encoding="utf-8"))

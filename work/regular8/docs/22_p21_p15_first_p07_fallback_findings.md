@@ -144,9 +144,9 @@ Artifacts:
 - `research/config/p21_p15_first_p07_fallback.json`
 - `research/p21_run_forced_frozen_p07.py`
 - `research/p21_analyze_and_render.py`
-- `work/p21_p15_first_p07_fallback/p07_valid.csv`
-- `work/p21_p15_first_p07_fallback/p07_missing.csv`
-- `work/Reel_46335_p21_p15_first_p07_fallback_2000_2350_20260829/measurements.csv`
-- `work/Reel_46335_p21_p15_first_p07_fallback_2000_2350_20260829/summary.json`
-- `work/Reel_46335_p21_p15_first_p07_fallback_2000_2350_20260829/Reel_46335_002000_002350_p21_p15_first_p07_fallback_16fps.mp4`
+- `work/regular8/p21_p15_first_p07_fallback/p07_valid.csv`
+- `work/regular8/p21_p15_first_p07_fallback/p07_missing.csv`
+- `work/regular8/Reel_46335_p21_p15_first_p07_fallback_2000_2350_20260829/measurements.csv`
+- `work/regular8/Reel_46335_p21_p15_first_p07_fallback_2000_2350_20260829/summary.json`
+- `work/regular8/Reel_46335_p21_p15_first_p07_fallback_2000_2350_20260829/Reel_46335_002000_002350_p21_p15_first_p07_fallback_16fps.mp4`
 

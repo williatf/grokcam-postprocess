@@ -137,6 +137,6 @@ Artifacts:
 - `research/p19_evaluate_y_residual_consensus.py`
 - `research/output/sprocket_xy/p19_y_residual_consensus/reel_46335_2000_2350/measurements.csv`
 - `research/output/sprocket_xy/p19_y_residual_consensus/reel_46335_2000_2350/summary.json`
-- `work/p19_y_residual_evidence/valid_evidence.jsonl`
-- `work/p19_y_residual_evidence/missing_evidence.jsonl`
+- `work/regular8/p19_y_residual_evidence/valid_evidence.jsonl`
+- `work/regular8/p19_y_residual_evidence/missing_evidence.jsonl`
 

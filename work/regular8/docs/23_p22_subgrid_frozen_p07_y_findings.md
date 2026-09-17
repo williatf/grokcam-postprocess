@@ -155,10 +155,10 @@ Artifacts:
 - `research/config/p22_subgrid_frozen_p07_y.json`
 - `research/p22_refine_frozen_p07_y.py`
 - `research/p22_analyze_and_render.py`
-- `work/p22_subgrid_p07_y/p22_valid.csv`
-- `work/p22_subgrid_p07_y/p22_missing.csv`
-- `work/Reel_46335_p22_subgrid_p07_y_2000_2350_20260829/measurements.csv`
-- `work/Reel_46335_p22_subgrid_p07_y_2000_2350_20260829/summary.json`
-- `work/Reel_46335_p22_subgrid_p07_y_2000_2350_20260829/Reel_46335_002000_002350_p22_p15_first_refined_p07_16fps.mp4`
-- `work/Reel_46335_p22_subgrid_p07_y_2000_2350_20260829/Reel_46335_002000_002350_p21_vs_p22_side_by_side_16fps.mp4`
+- `work/regular8/p22_subgrid_p07_y/p22_valid.csv`
+- `work/regular8/p22_subgrid_p07_y/p22_missing.csv`
+- `work/regular8/Reel_46335_p22_subgrid_p07_y_2000_2350_20260829/measurements.csv`
+- `work/regular8/Reel_46335_p22_subgrid_p07_y_2000_2350_20260829/summary.json`
+- `work/regular8/Reel_46335_p22_subgrid_p07_y_2000_2350_20260829/Reel_46335_002000_002350_p22_p15_first_refined_p07_16fps.mp4`
+- `work/regular8/Reel_46335_p22_subgrid_p07_y_2000_2350_20260829/Reel_46335_002000_002350_p21_vs_p22_side_by_side_16fps.mp4`
 

@@ -25,28 +25,28 @@ Using the Blue-derived mapping unchanged, it agrees within 5 developed pixels wi
 
 ### Input and coordinate system
 
-RAW capture configures a 760×570 `BGR888` preview alongside the immutable 2028×1520 `SRGGB12` DNG stream ([app.py](../research/input/GrokCam_capture_source/app.py#L28), [app.py](../research/input/GrokCam_capture_source/app.py#L766)). Detection runs on the already rendered 8-bit BGR preview while DNG writing proceeds concurrently; it does not inspect the Bayer DNG.
+RAW capture configures a 760×570 `BGR888` preview alongside the immutable 2028×1520 `SRGGB12` DNG stream ([app.py](../../../research/input/GrokCam_capture_source/app.py#L28), [app.py](../../../research/input/GrokCam_capture_source/app.py#L766)). Detection runs on the already rendered 8-bit BGR preview while DNG writing proceeds concurrently; it does not inspect the Bayer DNG.
 
-The preview pitch and area gates are scaled from full-resolution calibration ([app.py](../research/input/GrokCam_capture_source/app.py#L1432)). Exposure and gain are manually controlled with AE/AWB disabled ([app.py](../research/input/GrokCam_capture_source/app.py#L1781)). This controlled illumination is helpful but neither detector uses a single global fixed brightness threshold.
+The preview pitch and area gates are scaled from full-resolution calibration ([app.py](../../../research/input/GrokCam_capture_source/app.py#L1432)). Exposure and gain are manually controlled with AE/AWB disabled ([app.py](../../../research/input/GrokCam_capture_source/app.py#L1781)). This controlled illumination is helpful but neither detector uses a single global fixed brightness threshold.
 
 ### Fast detector
 
-`FastSprocketDetector.detect()` predicts two hole centers, runs one small ROI detector around each, then validates pair pitch and X agreement ([fast_sprocket.py](../research/input/GrokCam_capture_source/fast_sprocket.py#L39)).
+`FastSprocketDetector.detect()` predicts two hole centers, runs one small ROI detector around each, then validates pair pitch and X agreement ([fast_sprocket.py](../../../research/input/GrokCam_capture_source/fast_sprocket.py#L39)).
 
-- Initial centers are fixed normalized positions; subsequent centers are the previous accepted pair ([fast_sprocket.py](../research/input/GrokCam_capture_source/fast_sprocket.py#L63)).
-- Each ROI is approximately ±270×±190 reference pixels, scaled to the preview ([fast_sprocket.py](../research/input/GrokCam_capture_source/fast_sprocket.py#L71)).
-- Grayscale threshold is local: `background_p40 + 0.58*(peak_p99.5-background)`, clamped to 120–245 ([fast_sprocket.py](../research/input/GrokCam_capture_source/fast_sprocket.py#L86)). A 3×3 morphological open follows.
-- A horizontal gate around the expected perforation width prevents bright picture content from merging into the hole ([fast_sprocket.py](../research/input/GrokCam_capture_source/fast_sprocket.py#L96)).
-- External contours are gated by scaled width, height, aspect ratio, minimum area, ROI-edge contact, vertical ROI fill, rectangular fill, and distance from the prediction ([fast_sprocket.py](../research/input/GrokCam_capture_source/fast_sprocket.py#L110)).
-- The two results must agree with calibrated pitch within 90 reference Y pixels and with X within 90 reference X pixels ([fast_sprocket.py](../research/input/GrokCam_capture_source/fast_sprocket.py#L49)).
+- Initial centers are fixed normalized positions; subsequent centers are the previous accepted pair ([fast_sprocket.py](../../../research/input/GrokCam_capture_source/fast_sprocket.py#L63)).
+- Each ROI is approximately ±270×±190 reference pixels, scaled to the preview ([fast_sprocket.py](../../../research/input/GrokCam_capture_source/fast_sprocket.py#L71)).
+- Grayscale threshold is local: `background_p40 + 0.58*(peak_p99.5-background)`, clamped to 120–245 ([fast_sprocket.py](../../../research/input/GrokCam_capture_source/fast_sprocket.py#L86)). A 3×3 morphological open follows.
+- A horizontal gate around the expected perforation width prevents bright picture content from merging into the hole ([fast_sprocket.py](../../../research/input/GrokCam_capture_source/fast_sprocket.py#L96)).
+- External contours are gated by scaled width, height, aspect ratio, minimum area, ROI-edge contact, vertical ROI fill, rectangular fill, and distance from the prediction ([fast_sprocket.py](../../../research/input/GrokCam_capture_source/fast_sprocket.py#L110)).
+- The two results must agree with calibrated pitch within 90 reference Y pixels and with X within 90 reference X pixels ([fast_sprocket.py](../../../research/input/GrokCam_capture_source/fast_sprocket.py#L49)).
 
 This is genuine full-perforation detection: the returned tuple is the contour bounding-box center, width, height, and box area.
 
 ### Fallback detector
 
-When fast detection fails, `run_raw_capture()` calls `SprocketDetector.detect(..., mode="profile")` ([app.py](../research/input/GrokCam_capture_source/app.py#L1964)). Despite the mode name, `detect()` first runs the scored contour detector, then merges legacy profile candidates if fewer than two contours were found ([sprocket.py](../research/input/GrokCam_capture_source/sprocket.py#L53)).
+When fast detection fails, `run_raw_capture()` calls `SprocketDetector.detect(..., mode="profile")` ([app.py](../../../research/input/GrokCam_capture_source/app.py#L1964)). Despite the mode name, `detect()` first runs the scored contour detector, then merges legacy profile candidates if fewer than two contours were found ([sprocket.py](../../../research/input/GrokCam_capture_source/sprocket.py#L53)).
 
-The fallback begins with the left 40% of the frame; after three samples it locks a tighter X-only dynamic ROI around observed holes, and resets after three misses ([app.py](../research/input/GrokCam_capture_source/app.py#L1441), [sprocket.py](../research/input/GrokCam_capture_source/sprocket.py#L72), [sprocket.py](../research/input/GrokCam_capture_source/sprocket.py#L93)).
+The fallback begins with the left 40% of the frame; after three samples it locks a tighter X-only dynamic ROI around observed holes, and resets after three misses ([app.py](../../../research/input/GrokCam_capture_source/app.py#L1441), [sprocket.py](../../../research/input/GrokCam_capture_source/sprocket.py#L72), [sprocket.py](../../../research/input/GrokCam_capture_source/sprocket.py#L93)).
 
 Its contour path uses:
 
@@ -56,21 +56,21 @@ Its contour path uses:
 - external contours;
 - dimension, calibrated area, aspect ratio, solidity, vertical-position, and frame-edge scoring.
 
-The implementation is at [sprocket.py](../research/input/GrokCam_capture_source/sprocket.py#L285); geometry scoring is at [sprocket.py](../research/input/GrokCam_capture_source/sprocket.py#L579).
+The implementation is at [sprocket.py](../../../research/input/GrokCam_capture_source/sprocket.py#L285); geometry scoring is at [sprocket.py](../../../research/input/GrokCam_capture_source/sprocket.py#L579).
 
-The legacy profile supplement samples the ROI center column, finds bands above 95% of its maximum, measures width on a row at 25% hole height, requires a row peak of 180, and applies geometry/area gates ([sprocket.py](../research/input/GrokCam_capture_source/sprocket.py#L441)).
+The legacy profile supplement samples the ROI center column, finds bands above 95% of its maximum, measures width on a row at 25% hole height, requires a row peak of 180, and applies geometry/area gates ([sprocket.py](../../../research/input/GrokCam_capture_source/sprocket.py#L441)).
 
-Fallback results seed the fast detector ([app.py](../research/input/GrokCam_capture_source/app.py#L1990)). Every 25th frame, or when preview clipping reaches 15%, fallback cross-checks a successful fast result. A disagreement above 20 preview pixels replaces fast with the fallback pair and reseeds tracking ([app.py](../research/input/GrokCam_capture_source/app.py#L1977), [app.py](../research/input/GrokCam_capture_source/app.py#L2019)).
+Fallback results seed the fast detector ([app.py](../../../research/input/GrokCam_capture_source/app.py#L1990)). Every 25th frame, or when preview clipping reaches 15%, fallback cross-checks a successful fast result. A disagreement above 20 preview pixels replaces fast with the fallback pair and reseeds tracking ([app.py](../../../research/input/GrokCam_capture_source/app.py#L1977), [app.py](../../../research/input/GrokCam_capture_source/app.py#L2019)).
 
 ### Full/partial classification and pair selection
 
-`classify_sprockets()` marks any bounding box within the vertical edge margin as partial ([sprocket.py](../research/input/GrokCam_capture_source/sprocket.py#L149)). Only full holes enter registration in RAW capture ([app.py](../research/input/GrokCam_capture_source/app.py#L1983)).
+`classify_sprockets()` marks any bounding box within the vertical edge margin as partial ([sprocket.py](../../../research/input/GrokCam_capture_source/sprocket.py#L149)). Only full holes enter registration in RAW capture ([app.py](../../../research/input/GrokCam_capture_source/app.py#L1983)).
 
-Pair selection tests every ordered pair. Pitch tolerance is the larger of 12 pixels or 35% of expected pitch. Its score combines pitch (45%), proximity of pair midpoint to frame center (30%), and the two individual geometry scores (12.5% each); minimum pair score is 0.30 ([sprocket.py](../research/input/GrokCam_capture_source/sprocket.py#L178)). If no pair is trustworthy, the best single full hole may be returned ([sprocket.py](../research/input/GrokCam_capture_source/sprocket.py#L231)).
+Pair selection tests every ordered pair. Pitch tolerance is the larger of 12 pixels or 35% of expected pitch. Its score combines pitch (45%), proximity of pair midpoint to frame center (30%), and the two individual geometry scores (12.5% each); minimum pair score is 0.30 ([sprocket.py](../../../research/input/GrokCam_capture_source/sprocket.py#L178)). If no pair is trustworthy, the best single full hole may be returned ([sprocket.py](../../../research/input/GrokCam_capture_source/sprocket.py#L231)).
 
 ### Temporal phase, registration, and transport
 
-For a pair, registration Y is the midpoint of the two full-hole centers ([sprocket.py](../research/input/GrokCam_capture_source/sprocket.py#L248)). `RegistrationTracker`:
+For a pair, registration Y is the midpoint of the two full-hole centers ([sprocket.py](../../../research/input/GrokCam_capture_source/sprocket.py#L248)). `RegistrationTracker`:
 
 - accepts a pair midpoint directly and makes it the last-good position;
 - converts a single hole to two possible pair midpoints using ±half pitch, choosing the phase nearest last-good;
@@ -78,25 +78,25 @@ For a pair, registration Y is the midpoint of the two full-hole centers ([sprock
 - otherwise holds last-good;
 - also holds last-good when no measurement exists.
 
-See [registration.py](../research/input/GrokCam_capture_source/registration.py#L25) and its half-pitch candidates at [registration.py](../research/input/GrokCam_capture_source/registration.py#L109). `smoothing_alpha` is stored but is not used; pair measurements are not smoothed.
+See [registration.py](../../../research/input/GrokCam_capture_source/registration.py#L25) and its half-pitch candidates at [registration.py](../../../research/input/GrokCam_capture_source/registration.py#L109). `smoothing_alpha` is stored but is not used; pair measurements are not smoothed.
 
-Capture separately flags a pair-to-previous-pair phase jump above 0.22 pitch. Such a pair can still be selected for the preview crop, but it is barred from updating transport ([app.py](../research/input/GrokCam_capture_source/app.py#L2062), [app.py](../research/input/GrokCam_capture_source/app.py#L2084)). Trusted pair error relative to preview center drives the bounded adaptive motor controller; partial holes, disagreement, and phase jumps cannot update it.
+Capture separately flags a pair-to-previous-pair phase jump above 0.22 pitch. Such a pair can still be selected for the preview crop, but it is barred from updating transport ([app.py](../../../research/input/GrokCam_capture_source/app.py#L2062), [app.py](../../../research/input/GrokCam_capture_source/app.py#L2084)). Trusted pair error relative to preview center drives the bounded adaptive motor controller; partial holes, disagreement, and phase jumps cannot update it.
 
-The preview crop is registration-relative and scaled from the calibrated full-resolution crop ([app.py](../research/input/GrokCam_capture_source/app.py#L419)). Its purpose is live framing and transport control; the DNG itself remains uncropped.
+The preview crop is registration-relative and scaled from the calibrated full-resolution crop ([app.py](../../../research/input/GrokCam_capture_source/app.py#L419)). Its purpose is live framing and transport control; the DNG itself remains uncropped.
 
-After three consecutive missing pairs, capture steps forward in 10-step increments, using fallback full-pair detection until a pair lies within 80 preview pixels of target or 300 steps are exhausted ([app.py](../research/input/GrokCam_capture_source/app.py#L2140), [app.py](../research/input/GrokCam_capture_source/app.py#L245)).
+After three consecutive missing pairs, capture steps forward in 10-step increments, using fallback full-pair detection until a pair lies within 80 preview pixels of target or 300 steps are exhausted ([app.py](../../../research/input/GrokCam_capture_source/app.py#L2140), [app.py](../../../research/input/GrokCam_capture_source/app.py#L245)).
 
 ## Production post-processing pipeline
 
 ### Development stage and input
 
-Production selects contiguous `frame_*.dng` files only ([batch.py](../grokcam/batch.py#L52)). It develops every DNG once to a 16-bit TIFF using rawpy AHD demosaicing, calibrated camera white balance, linear gamma, sRGB output, and the frozen Darktable-match transform ([raw_development.py](../grokcam/raw_development.py#L49)). Primary sprocket detection runs on that full-resolution developed TIFF ([batch.py](../grokcam/batch.py#L177)).
+Production selects contiguous `frame_*.dng` files only ([batch.py](../../../grokcam/batch.py#L52)). It develops every DNG once to a 16-bit TIFF using rawpy AHD demosaicing, calibrated camera white balance, linear gamma, sRGB output, and the frozen Darktable-match transform ([raw_development.py](../../../grokcam/raw_development.py#L49)). Primary sprocket detection runs on that full-resolution developed TIFF ([batch.py](../../../grokcam/batch.py#L177)).
 
 No production module reads `raw_capture_metadata_*.jsonl`, `registration_metadata_*.jsonl`, capture crop rectangles, capture hole boxes, transport state, or capture detector confidence. Capture information is currently retained only as external debug provenance.
 
 ### Primary full-hole pair detector
 
-`sprocket_detection.detect()` is a NumPy luminance-band detector, not the capture OpenCV contour logic ([sprocket_detection.py](../grokcam/sprocket_detection.py#L24)).
+`sprocket_detection.detect()` is a NumPy luminance-band detector, not the capture OpenCV contour logic ([sprocket_detection.py](../../../grokcam/sprocket_detection.py#L24)).
 
 - ROI is a fixed developed-frame strip, X=100–570, across full image height.
 - Luminance is the simple RGB mean.
@@ -107,11 +107,11 @@ No production module reads `raw_capture_metadata_*.jsonl`, `registration_metadat
 - Within each band, columns must be bright for more than 55% of its height; at least 200 columns are required.
 - Candidate score combines pitch error, twice the two holes' X disagreement, and width error relative to 365 pixels.
 
-Defaults are defined at [config.py](../grokcam/config.py#L12). The selected anchor is mean hole X and the midpoint between the two band centers. This detects the bright full-hole regions in projection, but does not form contours, calculate solidity, distinguish full from partial explicitly, or retain multiple holes after selecting the best adjacent pair.
+Defaults are defined at [config.py](../../../grokcam/config.py#L12). The selected anchor is mean hole X and the midpoint between the two band centers. This detects the bright full-hole regions in projection, but does not form contours, calculate solidity, distinguish full from partial explicitly, or retain multiple holes after selecting the best adjacent pair.
 
 ### Batch validation and interpolation
 
-Detection failures become `None`. `validate_batch()` compares X and Y independently against a five-frame local median, rejecting deviations of 12 X pixels or 45 Y pixels. Every rejected/missing coordinate is linearly interpolated inside the batch; `numpy.interp` holds the first/last valid value at batch edges ([sprocket_detection.py](../grokcam/sprocket_detection.py#L56)). There is no cross-batch temporal detector state.
+Detection failures become `None`. `validate_batch()` compares X and Y independently against a five-frame local median, rejecting deviations of 12 X pixels or 45 Y pixels. Every rejected/missing coordinate is linearly interpolated inside the batch; `numpy.interp` holds the first/last valid value at batch edges ([sprocket_detection.py](../../../grokcam/sprocket_detection.py#L56)). There is no cross-batch temporal detector state.
 
 This is temporally safer against isolated false anchors than capture's unconditional pair acceptance, but real single-frame transport excursions beyond 45 pixels are deliberately rejected and then incorrectly smoothed unless residual stabilization recovers them.
 
@@ -125,19 +125,19 @@ crop_top  = anchor_y - 413
 crop_size = 1133 × 900
 ```
 
-See [registration.py](../grokcam/registration.py#L7) and [config.py](../grokcam/config.py#L30). Final output is sampled once from the developed TIFF with a bicubic extent transform, then vertically reoriented and contrast-adjusted ([image_processing.py](../grokcam/image_processing.py#L11)).
+See [registration.py](../../../grokcam/registration.py#L7) and [config.py](../../../grokcam/config.py#L30). Final output is sampled once from the developed TIFF with a bicubic extent transform, then vertically reoriented and contrast-adjusted ([image_processing.py](../../../grokcam/image_processing.py#L11)).
 
 ### Residual vertical stabilization
 
-When enabled, production makes an in-memory provisional primary crop, JPEG-serializes it at quality 95 to match the validated detector input, and measures residual sprocket boundaries ([batch.py](../grokcam/batch.py#L188)). This stage refines crop Y only; it does not replace primary X registration.
+When enabled, production makes an in-memory provisional primary crop, JPEG-serializes it at quality 95 to match the validated detector input, and measures residual sprocket boundaries ([batch.py](../../../grokcam/batch.py#L188)). This stage refines crop Y only; it does not replace primary X registration.
 
-The normal top detector searches output ROI `(0,150,90,285)` for the falling lower boundary of the retained upper hole. It uses Rec.709 luminance, a threshold of `max(0.70, p90*0.88)`, a smoothed bright-row fraction, gradient strength, local contrast, confidence, and a bright-tail rejection intended to exclude internal dirt/content edges ([vertical_stabilization.py](../grokcam/vertical_stabilization.py#L49)).
+The normal top detector searches output ROI `(0,150,90,285)` for the falling lower boundary of the retained upper hole. It uses Rec.709 luminance, a threshold of `max(0.70, p90*0.88)`, a smoothed bright-row fraction, gradient strength, local contrast, confidence, and a bright-tail rejection intended to exclude internal dirt/content edges ([vertical_stabilization.py](../../../grokcam/vertical_stabilization.py#L49)).
 
-If primary was rejected and normal top detection is invalid, adaptive search expands upward to Y=60 ([vertical_stabilization.py](../grokcam/vertical_stabilization.py#L138)). An independent bottom detector searches `(0,550,90,900)` for the rising boundary of the lower retained hole ([vertical_stabilization.py](../grokcam/vertical_stabilization.py#L82)).
+If primary was rejected and normal top detection is invalid, adaptive search expands upward to Y=60 ([vertical_stabilization.py](../../../grokcam/vertical_stabilization.py#L138)). An independent bottom detector searches `(0,550,90,900)` for the rising boundary of the lower retained hole ([vertical_stabilization.py](../../../grokcam/vertical_stabilization.py#L82)).
 
-Top correction is `224.9286 - measured_top_y`; bottom correction is `757 - measured_bottom_y`. Out-of-source crops are rejected. A valid top wins; bottom rescues only an invalid top; otherwise correction is interpolated within the batch or held at batch edges ([vertical_stabilization.py](../grokcam/vertical_stabilization.py#L149)). Top/bottom disagreement is logged, but the current resolver does not use agreement to choose between two valid measurements.
+Top correction is `224.9286 - measured_top_y`; bottom correction is `757 - measured_bottom_y`. Out-of-source crops are rejected. A valid top wins; bottom rescues only an invalid top; otherwise correction is interpolated within the batch or held at batch edges ([vertical_stabilization.py](../../../grokcam/vertical_stabilization.py#L149)). Top/bottom disagreement is logged, but the current resolver does not use agreement to choose between two valid measurements.
 
-The corrected crop is sampled directly from the original developed TIFF, so residual stabilization does not compound crops. Post-crop top residual is remeasured near the reference ([vertical_stabilization.py](../grokcam/vertical_stabilization.py#L213)).
+The corrected crop is sampled directly from the original developed TIFF, so residual stabilization does not compound crops. Post-crop top residual is remeasured near the reference ([vertical_stabilization.py](../../../grokcam/vertical_stabilization.py#L213)).
 
 ## Side-by-side comparison
 
