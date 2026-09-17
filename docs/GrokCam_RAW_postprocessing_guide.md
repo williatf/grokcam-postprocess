@@ -88,13 +88,13 @@ RunOptions + ProductionCalibration
    threaded DarktableMatchedDeveloper
               |
               v
-      detect each TIFF -> validate primary batch
+      primary detector places frozen P15 ROI
               |
               v
- rejected only: capture-ROI physical pair -> P06 partner -> full P07
+ P15 lower-top valid? yes -> optical register
               |
               v
- optional residual measurement -> resolve corrections
+ no -> forced full-domain P07 -> accepted-only P22 common-Y
               |
               v
  final full-resolution crop/register -> JPEG
@@ -169,7 +169,7 @@ operational choice that reduces peak disposable storage and restart cost.
 | `--calibration FILE` | none | Advanced JSON overrides for production calibration. Not needed for normal v1 processing. |
 | `--match-report FILE` | repository v1 artifact | Explicitly override the learned match report. Avoid for normal v1 production. |
 | `--vertical-stabilization` | off | Enable second-stage physical vertical registration. Use a new output directory. |
-| `--sprocket-detector-mode MODE` | `legacy` | Select `legacy` rollback behavior or the frozen `physical-p07-v1` same-frame fallback cascade. Never mix modes in one output directory. |
+| `--sprocket-detector-mode MODE` | `physical-p07-v1` | Select the promoted P15-first policy or explicit `legacy` rollback behavior. Never mix modes in one output directory. |
 | `-h`, `--help` | — | Print the authoritative CLI usage and exit. |
 
 The current configuration loader accepts detector, crop, match-report,
@@ -410,28 +410,39 @@ local median with edge padding. A measurement is accepted only when it is finite
 and lies strictly within the 12 px horizontal and 45 px vertical limits.
 
 The rollback `legacy` mode fills rejected or missing coordinates with its
-historical NumPy interpolation. In `physical-p07-v1`, a rejected primary instead
-passes through the same-frame physical-pair, P06, and full-domain P07 cascade.
-If every stage fails, the frame is excluded from encoding, its uncropped
+historical NumPy interpolation. In `physical-p07-v1`, the primary result only
+places the frozen P15 ROI. A valid P15 lower-top is authoritative. Only a P15
+failure invokes forced full-domain P07; physical-pair and P06 evidence may be
+priors but cannot become final sources. An accepted P07 is refined by frozen
+P22 in common Y only. If P07 rejects, the frame is excluded and its uncropped
 developed TIFF is preserved under `debug/excluded_frames/`, and processing
 continues. No temporal registration interpolation occurs in this mode.
 
-This is the primary detector. When second-stage vertical stabilization is
-enabled, its result still determines the initial frame location; residual
-registration refines only the final vertical crop coordinate.
+Residual vertical stabilization cannot be enabled with `physical-p07-v1`.
 
 ## 8. Registration and cropping
 
 Detection measures film position; registration uses that measurement to place a
 fixed presentation window. They are distinct stages.
 
-For each accepted trusted anchor (or historical legacy interpolated anchor):
+Legacy registration remains:
 
 ```text
 crop_left = anchor_x + 159.0
 crop_top  = anchor_y - 413.0
 width     = 1133
 height    = 900
+```
+
+The physical P15/P07/P22 mode instead uses:
+
+```text
+P15 success: optical_lower_top_y = P15 lower-top
+P15 failure and P07 acceptance:
+    refined_model_lower_top_y = refined_lower_center_y - 136
+    optical_lower_top_y = refined_model_lower_top_y + 4.178787846871160
+crop_top = optical_lower_top_y - 673.5297914597816
+crop_left = primary_or_P07_anchor_x + 159
 ```
 
 The coordinates can be fractional. With residual stabilization disabled, this
@@ -647,11 +658,12 @@ first, last, frames, source_frames, excluded, video, video_bytes, video_sha256
 verified, verification, reference_sprocket_x
 detected, accepted, interpolated
 elapsed_seconds, completed, frame_records, retained
+stage_timings_seconds, registration_counts
 ```
 
 `verification` contains FFprobe stream/format data. `elapsed_seconds` is total
-batch wall time. Individual stage timings are printed to the console but are not
-currently persisted in the manifest.
+batch wall time. Stage timings and P15/P07/P22 invocation counts are persisted;
+the final manifest also records totals and mean time per relevant invocation.
 
 ### Frame records
 
