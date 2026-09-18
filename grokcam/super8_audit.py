@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import queue
 import shutil
 import statistics
 import tempfile
@@ -352,6 +353,52 @@ def _cleanup_staging(work: Path) -> None:
     shutil.rmtree(work)
 
 
+def _mark_scheduler(state: dict, key: str, origin: float | None) -> None:
+    if origin is not None:
+        state.setdefault("scheduler", {})[key] = time.perf_counter() - origin
+
+
+def _unresolved_suffix(records: list[dict]) -> list[dict]:
+    suffix = []
+    for record in reversed(records):
+        if record.get("accepted"):
+            break
+        suffix.append(record)
+    return list(reversed(suffix))
+
+
+def _boundary_requires_one_future_frame(records: list[dict]) -> bool:
+    suffix = _unresolved_suffix(records)
+    if len(suffix) != 1:
+        return False
+    index = records.index(suffix[0])
+    previous = records[index - 1] if index else None
+    return _is_direct(previous)
+
+
+def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    merged = []
+    for start, end in sorted(intervals):
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return [(start, end) for start, end in merged]
+
+
+def _interval_union_length(intervals: list[tuple[float, float]]) -> float:
+    return sum(end - start for start, end in _merge_intervals(intervals))
+
+
+def _interval_overlap(left: list[tuple[float, float]],
+                      right: list[tuple[float, float]]) -> float:
+    left = _merge_intervals(left)
+    right = _merge_intervals(right)
+    return sum(max(0.0, min(left_end, right_end) - max(left_start, right_start))
+               for left_start, left_end in left
+               for right_start, right_end in right)
+
+
 def _progress_checkpoint(done: int, total: int) -> bool:
     return done == 1 or done % PROGRESS_INTERVAL == 0 or done == total
 
@@ -388,12 +435,27 @@ def _batch_report(state: dict, segment: dict) -> dict:
         f"{name}={counts[name]}" for name in
         ("PRIMARY", "SECONDARY", "FALLBACK", "TEMPLATE_FALLBACK", "INTERPOLATED", "UNTRUSTED")),
         flush=True)
+    scheduler = {key: value for key, value in state.get("scheduler", {}).items()
+                 if not key.startswith("_")}
+    if scheduler:
+        producer_start = scheduler.get("producer_start")
+        producer_finished = scheduler.get("producer_finished")
+        consumer_start = scheduler.get("consumer_start")
+        consumer_finished = scheduler.get("consumer_finished")
+        producer_wall = (producer_finished - producer_start
+                         if producer_start is not None and producer_finished is not None else 0.0)
+        consumer_wall = (consumer_finished - consumer_start
+                         if consumer_start is not None and consumer_finished is not None else 0.0)
+        print(f"  Concurrency: producer {producer_wall:.2f}s; consumer {consumer_wall:.2f}s; "
+              f"queue wait {scheduler.get('consumer_queue_wait_seconds', 0.0):.2f}s; "
+              f"boundary {scheduler.get('boundary_closed', 'unknown')}", flush=True)
     return {
         "first": state["first"], "last": state["last"],
         "source_frames": len(state["records"]),
         "rendered_frames": int(segment.get("frames", 0)),
         "excluded_frames": int(segment.get("excluded", 0)),
         "timing_seconds": timing_report,
+        "scheduler": scheduler,
         "registration_counts": {name: counts[name] for name in
                                  ("PRIMARY", "SECONDARY", "FALLBACK",
                                   "TEMPLATE_FALLBACK", "INTERPOLATED", "UNTRUSTED")},
@@ -424,7 +486,8 @@ def _write_records(output_dir: Path, records: list[dict]) -> None:
 
 def _render_staged_batch(state: dict, output_dir: Path,
                          calibration: ProductionCalibration, options,
-                         encoded_before: int, target_luma: float | None) -> tuple[dict, float | None, list[str]]:
+                         encoded_before: int, target_luma: float | None,
+                         timing_origin: float | None = None) -> tuple[dict, float | None, list[str]]:
     crop = calibration.super8_registration
     registered = state["work"] / "registered"
     normalized = state["work"] / "normalized"
@@ -467,6 +530,7 @@ def _render_staged_batch(state: dict, output_dir: Path,
                            "encoded_output_frame": encoded_number,
                            "output_disposition": "included"})
     state["timings"]["crop_render_wall_seconds"] = time.perf_counter() - crop_started
+    _mark_scheduler(state, "crop_render_finished", timing_origin)
     if not registered_paths:
         return ({"first": state["first"], "last": state["last"], "frames": 0,
                  "source_frames": len(state["records"]), "excluded": len(state["records"])},
@@ -474,6 +538,7 @@ def _render_staged_batch(state: dict, output_dir: Path,
     normalization_started = time.perf_counter()
     corrections, target_luma = normalize_frames(registered_paths, normalized, target_luma)
     state["timings"]["normalization_wall_seconds"] = time.perf_counter() - normalization_started
+    _mark_scheduler(state, "normalization_finished", timing_origin)
     included = [record for record in state["records"]
                 if record.get("output_disposition") == "included"]
     for record, correction in zip(included, corrections):
@@ -486,6 +551,7 @@ def _render_staged_batch(state: dict, output_dir: Path,
     verification = verify_video(options.ffmpeg, options.ffprobe, temporary, len(registered_paths))
     temporary.replace(video)
     state["timings"]["encoding_verification_wall_seconds"] = time.perf_counter() - encoding_started
+    _mark_scheduler(state, "encoding_verification_finished", timing_origin)
     return ({"first": state["first"], "last": state["last"], "frames": len(registered_paths),
              "source_frames": len(state["records"]),
              "excluded": len(state["records"]) - len(registered_paths),
@@ -548,6 +614,9 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
     """Normal Super 8 production: one RAW development per DNG."""
     if not calibration.super8_registration.crop_validated:
         raise RuntimeError("Super 8 rendering requires crop_validated=true")
+    if not dngs:
+        raise ValueError("Super 8 production requires at least one DNG")
+    pipeline_started = time.perf_counter()
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "segments").mkdir(exist_ok=True)
     staging = output_dir / ".super8-staging"
@@ -560,95 +629,245 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
     for planned in batches:
         print(f"  {_frame_number(planned[0]):06d}-{_frame_number(planned[-1]):06d} "
               f"({len(planned)} frames)", flush=True)
-    previous = None
-    target_luma = None
-    encoded_before = 0
-    segments, records, diagnostic_paths, batch_timings = [], [], [], []
     last_frame = _frame_number(dngs[-1])
-    for batch_index, paths in enumerate(batches, start=1):
+    batch_queue = queue.Queue(maxsize=1)
+    stop_event = threading.Event()
+    producer_done = threading.Event()
+    producer_failure: list[BaseException] = []
+    consumer_queue_wait_seconds = 0.0
+    maximum_queue_depth = 0
+
+    def start_state(paths: list[Path], batch_index: int) -> dict:
         first, last = _frame_number(paths[0]), _frame_number(paths[-1])
         work = staging / f"segment_{first:06d}_{last:06d}"
         tiffs = work / "tiff"
         tiffs.mkdir(parents=True)
-        batch_records = []
-        timings = {}
-        phase_started = time.perf_counter()
+        state = {"first": first, "last": last, "paths": paths,
+                 "records": [], "tiffs": tiffs, "work": work, "timings": {},
+                 "scheduler": {"batch_index": batch_index}}
+        _mark_scheduler(state, "producer_start", pipeline_started)
+        state["_phase_started"] = time.perf_counter()
         print(f"[{batch_index}/{len(batches)}] developing and registering "
               f"{len(paths)} frames ({first:06d}-{last:06d})", flush=True)
+        return state
 
+    def register_one(dng: Path, tiff: Path) -> tuple[dict, float]:
+        started = time.perf_counter()
+        with Image.open(tiff) as image:
+            result = registrar.register(image)
+            record = _record_from_result(dng, result, [image.width, image.height])
+        return record, time.perf_counter() - started
+
+    def add_timing(state: dict, name: str, value: float,
+                   lock: threading.Lock | None = None) -> None:
+        if lock is None:
+            state["timings"][name] = state["timings"].get(name, 0.0) + value
+            return
+        with lock:
+            state["timings"][name] = state["timings"].get(name, 0.0) + value
+
+    def prefetch_one(state: dict) -> None:
+        path = state["paths"][0]
+        tiff = state["tiffs"] / path.name.replace(".dng", ".tif")
+        started = time.perf_counter()
+        developer.develop(path, tiff)
+        worker_seconds = time.perf_counter() - started
+        record, registration_seconds = register_one(path, tiff)
+        state["preloaded"] = {"path": path, "tiff": tiff, "record": record,
+                              "worker_seconds": worker_seconds,
+                              "registration_seconds": registration_seconds}
+        state["records"] = [record]
+        add_timing(state, "raw_development_worker_seconds", worker_seconds)
+        add_timing(state, "registration_main_thread_seconds", registration_seconds)
+        state["_developed_count"] = 1
+        state["_registered_count"] = 1
+        if _progress_checkpoint(1, len(state["paths"])):
+            print(f"  developed 1/{len(state['paths'])}; free "
+                  f"{_free_gib(output_dir):.1f} GiB", flush=True)
+            print(f"  registered 1/{len(state['paths'])}", flush=True)
+
+    def finish_state(state: dict) -> dict:
+        paths = state["paths"]
+        preloaded = state.get("preloaded")
+        preloaded_path = preloaded["path"] if preloaded else None
+        records_by_path = {}
+        if preloaded is not None:
+            records_by_path[preloaded_path] = preloaded["record"]
+        state.setdefault("_developed_count", 0)
+        state.setdefault("_registered_count", 0)
         progress_lock = threading.Lock()
-        developed_count = 0
 
         def develop(path: Path) -> tuple[Path, float]:
-            tiff = tiffs / path.name.replace(".dng", ".tif")
+            tiff = state["tiffs"] / path.name.replace(".dng", ".tif")
             started = time.perf_counter()
             developer.develop(path, tiff)
             return tiff, time.perf_counter() - started
 
         def report_development(future) -> None:
-            nonlocal developed_count
             try:
                 _tiff, worker_seconds = future.result()
             except BaseException:
                 return
             with progress_lock:
-                developed_count += 1
-                timings["raw_development_worker_seconds"] = (
-                    timings.get("raw_development_worker_seconds", 0.0) + worker_seconds)
-                if _progress_checkpoint(developed_count, len(paths)):
-                    print(f"  developed {developed_count}/{len(paths)}; "
-                          f"free {_free_gib(output_dir):.1f} GiB", flush=True)
+                state["_developed_count"] += 1
+                state["timings"]["raw_development_worker_seconds"] = (
+                    state["timings"].get("raw_development_worker_seconds", 0.0) + worker_seconds)
+                done = state["_developed_count"]
+            if _progress_checkpoint(done, len(paths)):
+                print(f"  developed {done}/{len(paths)}; free "
+                      f"{_free_gib(output_dir):.1f} GiB", flush=True)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, options.jobs)) as pool:
             developed = {}
             for path in paths:
+                if path == preloaded_path:
+                    continue
                 future = pool.submit(develop, path)
                 future.add_done_callback(report_development)
                 developed[path] = future
-            registered_count = 0
             for dng in paths:
+                if dng == preloaded_path:
+                    continue
                 tiff, _worker_seconds = developed[dng].result()
-                register_started = time.perf_counter()
-                with Image.open(tiff) as image:
-                    result = registrar.register(image)
-                    batch_records.append(_record_from_result(dng, result, [image.width, image.height]))
-                timings["registration_main_thread_seconds"] = (
-                    timings.get("registration_main_thread_seconds", 0.0) +
-                    time.perf_counter() - register_started)
-                registered_count += 1
-                if _progress_checkpoint(registered_count, len(paths)):
-                    print(f"  registered {registered_count}/{len(paths)}", flush=True)
-            timings["develop_register_wall_seconds"] = time.perf_counter() - phase_started
-        current = {"first": first, "last": last, "records": batch_records,
-                   "tiffs": tiffs, "work": work, "timings": timings}
-        if previous is not None:
-            _resolve_batch(previous["records"], right=batch_records[0])
-            _resolve_batch(batch_records, left=previous["records"][-1], defer_last=True)
-            segment, target_luma, paths_written = _render_staged_batch(
-                previous, output_dir, calibration, options, encoded_before, target_luma)
-            segments.append(segment)
-            encoded_before += segment["frames"]
-            records.extend(previous["records"])
-            diagnostic_paths.extend(paths_written)
-            batch_timings.append(_batch_report(previous, segment))
-            _cleanup_staging(previous["work"])
-            print(f"  verified and cleaned segment {previous['first']:06d}-{previous['last']:06d}; "
-                  f"free {_free_gib(output_dir):.1f} GiB", flush=True)
-        previous = current
-        print(f"super8 production {last:06d}/{last_frame:06d}", flush=True)
-    if previous is not None:
-        _resolve_batch(previous["records"])
-        segment, target_luma, paths_written = _render_staged_batch(
-            previous, output_dir, calibration, options, encoded_before, target_luma)
-        segments.append(segment)
-        encoded_before += segment["frames"]
-        records.extend(previous["records"])
-        diagnostic_paths.extend(paths_written)
-        batch_timings.append(_batch_report(previous, segment))
-        _cleanup_staging(previous["work"])
-        print(f"  verified and cleaned segment {previous['first']:06d}-{previous['last']:06d}; "
-              f"free {_free_gib(output_dir):.1f} GiB", flush=True)
+                record, registration_seconds = register_one(dng, tiff)
+                records_by_path[dng] = record
+                with progress_lock:
+                    state["timings"]["registration_main_thread_seconds"] = (
+                        state["timings"].get("registration_main_thread_seconds", 0.0) +
+                        registration_seconds)
+                    state["_registered_count"] += 1
+                    done = state["_registered_count"]
+                if _progress_checkpoint(done, len(paths)):
+                    print(f"  registered {done}/{len(paths)}", flush=True)
+        state["records"] = [records_by_path[path] for path in paths]
+        state["timings"]["develop_register_wall_seconds"] = (
+            time.perf_counter() - state["_phase_started"])
+        return state
 
+    def resolve_boundary(state: dict, left: dict | None,
+                         future_state: dict | None) -> str:
+        records = state["records"]
+        _resolve_batch(records, left=left, defer_last=True)
+        suffix = _unresolved_suffix(records)
+        if future_state is not None and _boundary_requires_one_future_frame(records):
+            _resolve_batch(records, right=future_state["records"][0])
+        elif len(suffix) != 0:
+            _resolve_batch(records)
+        boundary = "closed" if not _unresolved_suffix(records) else "untrusted"
+        state["scheduler"]["boundary_closed"] = boundary
+        _mark_scheduler(state, "batch_boundary_closed", pipeline_started)
+        _mark_scheduler(state, "producer_finished", pipeline_started)
+        return boundary
+
+    def enqueue(state: dict) -> bool:
+        nonlocal maximum_queue_depth
+        scheduler = state["scheduler"]
+        _mark_scheduler(state, "enqueue_start", pipeline_started)
+        blocked_started = None
+        while not stop_event.is_set():
+            try:
+                batch_queue.put({"kind": "batch", "state": state}, timeout=.05)
+                break
+            except queue.Full:
+                if blocked_started is None:
+                    blocked_started = time.perf_counter()
+        else:
+            return False
+        blocked_seconds = (time.perf_counter() - blocked_started
+                           if blocked_started is not None else 0.0)
+        scheduler["producer_queue_blocked_seconds"] = blocked_seconds
+        _mark_scheduler(state, "enqueue_finished", pipeline_started)
+        maximum_queue_depth = max(maximum_queue_depth, batch_queue.qsize())
+        return True
+
+    def produce() -> None:
+        pending_state = None
+        index = 0
+        try:
+            while index < len(batches):
+                state = pending_state
+                pending_state = None
+                if state is None:
+                    state = start_state(batches[index], index + 1)
+                state = finish_state(state)
+                left = None if index == 0 else last_produced_records[-1]
+                future_state = None
+                if (_boundary_requires_one_future_frame(state["records"])
+                        and index + 1 < len(batches)):
+                    future_state = start_state(batches[index + 1], index + 2)
+                    prefetch_one(future_state)
+                resolve_boundary(state, left, future_state)
+                if not enqueue(state):
+                    return
+                last_produced_records[:] = state["records"]
+                print(f"super8 production {state['last']:06d}/{last_frame:06d}", flush=True)
+                if future_state is not None:
+                    pending_state = future_state
+                index += 1
+        except BaseException as error:
+            producer_failure.append(error)
+            if not stop_event.is_set():
+                while not stop_event.is_set():
+                    try:
+                        batch_queue.put({"kind": "error", "error": error}, timeout=.05)
+                        break
+                    except queue.Full:
+                        continue
+        finally:
+            producer_done.set()
+
+    last_produced_records: list[dict] = []
+    producer_thread = threading.Thread(target=produce, name="super8-producer")
+    producer_thread.start()
+
+    target_luma = None
+    encoded_before = 0
+    segments, records, diagnostic_paths, batch_timings = [], [], [], []
+    consumer_intervals = []
+    try:
+        for _ in batches:
+            wait_started = time.perf_counter()
+            while True:
+                try:
+                    item = batch_queue.get(timeout=.05)
+                    break
+                except queue.Empty:
+                    if producer_done.is_set() and producer_failure:
+                        raise producer_failure[0]
+            wait_seconds = time.perf_counter() - wait_started
+            consumer_queue_wait_seconds += wait_seconds
+            if item["kind"] == "error":
+                batch_queue.task_done()
+                raise item["error"]
+            state = item["state"]
+            state["scheduler"]["consumer_queue_wait_seconds"] = wait_seconds
+            _mark_scheduler(state, "consumer_start", pipeline_started)
+            try:
+                segment, target_luma, paths_written = _render_staged_batch(
+                    state, output_dir, calibration, options, encoded_before, target_luma,
+                    pipeline_started)
+                segments.append(segment)
+                encoded_before += segment["frames"]
+                records.extend(state["records"])
+                diagnostic_paths.extend(paths_written)
+                _cleanup_staging(state["work"])
+                _mark_scheduler(state, "consumer_finished", pipeline_started)
+                consumer_intervals.append((state["scheduler"]["consumer_start"],
+                                            state["scheduler"]["consumer_finished"]))
+                batch_timings.append(_batch_report(state, segment))
+                print(f"  verified and cleaned segment {state['first']:06d}-{state['last']:06d}; "
+                      f"free {_free_gib(output_dir):.1f} GiB", flush=True)
+            finally:
+                batch_queue.task_done()
+    except BaseException:
+        stop_event.set()
+        producer_thread.join()
+        raise
+    producer_thread.join()
+    if producer_failure:
+        raise producer_failure[0]
+
+    finalization_started = time.perf_counter()
     concat = output_dir / "segments.txt"
     final = output_dir / f"Super8_REDO5_{dngs[0].stem.rsplit('_', 1)[-1]}_{dngs[-1].stem.rsplit('_', 1)[-1]}_{options.fps}fps.mp4"
     temporary = final.with_suffix(".tmp.mp4")
@@ -671,6 +890,24 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
                           "output_video_verification": final_verification,
                           "segments": segments}
     _write_records(output_dir, records)
+    producer_intervals = [(item["scheduler"]["producer_start"],
+                           item["scheduler"]["producer_finished"])
+                          for item in batch_timings]
+    scheduler = {
+        "queue_capacity": 1,
+        "maximum_observed_queue_depth": maximum_queue_depth,
+        "producer_active_wall_seconds": _interval_union_length(producer_intervals),
+        "consumer_active_wall_seconds": _interval_union_length(consumer_intervals),
+        "producer_consumer_overlap_wall_seconds": _interval_overlap(
+            producer_intervals, consumer_intervals),
+        "producer_queue_blocked_seconds": sum(
+            item["scheduler"].get("producer_queue_blocked_seconds", 0.0)
+            for item in batch_timings),
+        "consumer_queue_wait_seconds": consumer_queue_wait_seconds,
+        "finalization_wall_seconds": time.perf_counter() - finalization_started,
+        "core_process_wall_seconds": time.perf_counter() - pipeline_started,
+    }
+    summary["scheduler"] = scheduler
     (output_dir / "registration_audit.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _write_processing_manifest(output_dir, dngs, calibration, summary, options, records)

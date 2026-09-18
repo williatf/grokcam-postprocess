@@ -319,10 +319,22 @@ def _print_super8_completion(summary: dict) -> None:
          "INTERPOLATED", "UNTRUSTED")), flush=True)
     print("Consecutive exclusion/untrusted runs: " +
           str(summary.get("consecutive_exclusion_untrusted_runs", [])), flush=True)
+    scheduler = summary.get("scheduler", {})
+    if scheduler:
+        print("Scheduler timing: "
+              f"total={scheduler.get('total_process_wall_seconds', 0.0):.2f}s; "
+              f"producer={scheduler.get('producer_active_wall_seconds', 0.0):.2f}s; "
+              f"consumer={scheduler.get('consumer_active_wall_seconds', 0.0):.2f}s; "
+              f"overlap={scheduler.get('producer_consumer_overlap_wall_seconds', 0.0):.2f}s; "
+              f"producer queue-blocked={scheduler.get('producer_queue_blocked_seconds', 0.0):.2f}s; "
+              f"consumer queue-wait={scheduler.get('consumer_queue_wait_seconds', 0.0):.2f}s; "
+              f"finalization/publication={scheduler.get('finalization_publication_wall_seconds', 0.0):.2f}s",
+              flush=True)
 
 
 def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
     """Run production, optionally isolating all transient output locally."""
+    process_started = time.perf_counter()
     staging_parent = _validated_staging_root(options)
     output_dir = options.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -338,10 +350,23 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
         working_options = replace(
             options, raw_dir=options.raw_dir, output_dir=work_dir, staging_dir=None)
         result = _run_reel_core(working_options, calibration)
+        publication_started = time.perf_counter()
         _publish_staged_output(work_dir, output_dir, staging_parent)
         succeeded = True
         published_result = _replace_path_prefix(result, str(work_dir), str(output_dir))
         if calibration.film_format == "super8" and not options.registration_only:
+            scheduler = published_result.setdefault("scheduler", {})
+            publication_seconds = time.perf_counter() - publication_started
+            scheduler["publication_wall_seconds"] = publication_seconds
+            scheduler["finalization_publication_wall_seconds"] = (
+                scheduler.get("finalization_wall_seconds", 0.0) + publication_seconds)
+            scheduler["total_process_wall_seconds"] = time.perf_counter() - process_started
+            manifest = output_dir / "processing_manifest.json"
+            if manifest.exists():
+                manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+                manifest_data["summary"] = published_result
+                manifest.write_text(json.dumps(manifest_data, indent=2) + "\n",
+                                    encoding="utf-8")
             _print_super8_completion(published_result)
         return published_result
     except BaseException as error:
