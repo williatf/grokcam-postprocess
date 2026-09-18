@@ -42,7 +42,10 @@ runtime dependencies.
 
 ## Run a reel
 
-Use the processing virtual environment already provisioned for this project:
+Use the single canonical GrokCam production environment already provisioned for
+the telecine VM: `/home/todd/telecine/.venv`. The project is installed there in
+editable mode while development continues. The equivalent installed console
+entry point is `grokcam-process-reel`.
 
 ```bash
 /home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
@@ -60,7 +63,9 @@ First inspect a plan without processing:
 
 Useful options are `--first`, `--last`, `--batch-frames`, `--jobs`, `--fps`,
 `--minimum-free-gib`, `--calibration`, `--match-report`, and
-`--vertical-stabilization`. `--sprocket-detector-mode` selects the production
+`--vertical-stabilization`. Production staging defaults to the local
+`/mnt/grokcam-scratch` filesystem; use `--staging-dir PATH` to override it.
+`--sprocket-detector-mode` selects the production
 default `physical-p07-v1` or rollback-only `legacy`; either must use an output
 directory whose manifest has the same recorded policy. Residual vertical
 registration is available only in legacy mode.

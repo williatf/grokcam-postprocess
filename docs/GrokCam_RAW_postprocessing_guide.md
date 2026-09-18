@@ -110,10 +110,13 @@ RunOptions + ProductionCalibration
 
 ### Runtime prerequisites
 
-Use the project virtual environment at `/home/todd/telecine/.venv`. The Python
-package dependencies are NumPy, Pillow, rawpy, and tifffile. Production also
-requires FFmpeg and FFprobe; it does not require Darktable. Confirm the external
-video tools before a long run:
+Use the single canonical GrokCam production environment at
+`/home/todd/telecine/.venv`. The `grokcam-postprocess` project is installed there
+in editable mode while development continues. Its production dependencies are
+NumPy, Pillow, rawpy, tifffile, and headless OpenCV. Production also requires
+FFmpeg and FFprobe; it does not require Darktable. The installed
+`grokcam-process-reel` console entry point is equivalent to the module command.
+Confirm the runtime and external video tools before a long run:
 
 ```bash
 /home/todd/telecine/.venv/bin/python -c \
@@ -154,7 +157,7 @@ operational choice that reduces peak disposable storage and restart cost.
 | Argument | Default | Meaning |
 |---|---:|---|
 | `raw_dir` | required | Directory containing the source `frame_*.dng` sequence. |
-| `output_dir` | required | Dedicated directory for the manifest, staging, segments, and final movie. It is created if missing. |
+| `output_dir` | required | Dedicated directory for persistent manifests, diagnostics, and the final movie. It is created if missing. |
 | `--first N` | all | Select frames numbered `N` or higher. Inclusive. |
 | `--last N` | all | Select frames numbered `N` or lower. Inclusive. |
 | `--batch-frames N` | `960` | Maximum frames in each independently encoded batch. Must be positive. |
@@ -164,6 +167,7 @@ operational choice that reduces peak disposable storage and restart cost.
 | `--ffmpeg PATH` | discovered in `PATH`, otherwise `/usr/local/bin/ffmpeg` | FFmpeg executable. |
 | `--ffprobe PATH` | discovered in `PATH`, otherwise `/usr/local/bin/ffprobe` | FFprobe executable. |
 | `--minimum-free-gib N` | `22.0` | Refuse to start or continue a batch below this free-space threshold on the output filesystem. |
+| `--staging-dir PATH` | `/mnt/grokcam-scratch` | Existing writable local filesystem used for per-render TIFFs, registration images, normalized images, and encoded segments. A unique run directory is created beneath it. |
 | `--plan-only` | off | Show selected remaining ranges and batches without processing images. |
 | `--dry-run` | off | Exact alias for `--plan-only`. |
 | `--calibration FILE` | none | Advanced JSON overrides for production calibration. Not needed for normal v1 processing. |
@@ -236,10 +240,11 @@ Never use the archival RAW directory as `OUTPUT_DIR`.
 
 ### Output during processing
 
-For a batch covering frames 1–300, the output may temporarily look like:
+For a batch covering frames 1–300, the local staging filesystem may temporarily
+look like:
 
 ```text
-production-v1/
+grokcam-regular8-<unique-run>/
 ├── .pipeline.lock
 ├── .staging/
 │   └── segment_000001_000300/
@@ -258,6 +263,10 @@ production-v1/
 └── processing_manifest.json
 ```
 
+The persistent `OUTPUT_DIR` contains only the final/published artifacts after
+successful completion. The completed manifest records `staging_root`, the
+actual per-render `staging_directory`, and `output_directory`.
+
 The segment filename currently contains the literal suffix `_16fps` even when a
 non-default `--fps` is selected. The encoded rate follows `--fps`; the segment
 basename is a v1 naming quirk. The final movie name uses the actual requested
@@ -270,7 +279,6 @@ For frames 1–3483 at 16 fps:
 ```text
 production-v1/
 ├── .pipeline.lock
-├── .staging/
 ├── RAW_review_000001_003483_16fps.mp4
 ├── processing_manifest.json
 └── run.log                         # only if captured with tee
@@ -278,8 +286,8 @@ production-v1/
 
 After final verification, component segment videos and `segments.txt` are
 deleted, and `segments/` is removed if empty. Batch TIFFs and both JPEG sequences
-are also deleted after their segment is verified. The empty `.staging/` directory
-and lock file may remain.
+are also deleted after their segment is verified. The unique local staging run
+directory is removed only after persistent artifacts have been published.
 
 The lock file's existence does not mean a process is running: exclusivity is
 provided by an operating-system `flock`, which is released when the process
@@ -893,10 +901,10 @@ The output reports:
 Planning also validates that DNG selection is nonempty and contiguous and that
 the output filesystem meets the free-space threshold.
 
-`--plan-only` performs no image development or encoding, but it is not completely
-filesystem-neutral: it creates the output directory, lock file, `.staging/`, and
-`segments/`; on a new output it also creates the initial manifest and queries the
-FFmpeg version. Use the same dedicated output directory intended for processing.
+`--plan-only` performs no image development or encoding, but it validates the
+configured staging filesystem and creates a unique local run directory. It also
+creates the output lock. Use the same dedicated output directory intended for
+processing.
 
 ## 15. Calibration versus production
 

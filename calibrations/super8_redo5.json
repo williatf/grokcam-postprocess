@@ -1,0 +1,14 @@
+{
+  "film_format": "super8",
+  "vertical_flip": true,
+  "super8_registration": {
+    "template_bank": "/home/todd/telecine/grokcam-postprocess/calibrations/super8_template_bank_v1.npz",
+    "template_metadata": "/home/todd/telecine/grokcam-postprocess/calibrations/super8_template_bank_v1.json",
+    "crop_validated": true,
+    "crop_version": "super8-redo5-crop-v1",
+    "crop_x_offset": 60.0,
+    "crop_y_offset": -500.0,
+    "crop_width": 1320,
+    "crop_height": 1000
+  }
+}

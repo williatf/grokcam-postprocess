@@ -12,7 +12,8 @@ from PIL import Image
 
 from grokcam.config import (DEFAULT_MATCH_REPORT, DetectorCalibration,
                             VerticalStabilizationCalibration, load_calibration)
-from grokcam.batch import (RunOptions, finalize_if_complete, frame_number,
+from grokcam.batch import (RunOptions, _publish_staged_output,
+                           finalize_if_complete, frame_number, run_reel,
                            preserve_excluded_tiff, remaining_batches)
 from grokcam.manifest import PIPELINE_ID, load_or_create
 from grokcam.models import SprocketDetection
@@ -352,6 +353,170 @@ class ProductionTests(unittest.TestCase):
             self.assertTrue(manifest["final"]["verified"])
             self.assertFalse(video.exists())
             self.assertTrue(manifest_path.exists())
+
+    def test_local_staging_publishes_persistent_outputs_and_rewrites_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "staging" / "grokcam-regular8-run"
+            output = root / "nfs-output"
+            work.mkdir(parents=True)
+            movie = work / "RAW_review_000001_000002_16fps.mp4"
+            movie.write_bytes(b"movie")
+            (work / "diagnostics").mkdir()
+            (work / "diagnostics" / "frame.json").write_text(
+                json.dumps({"movie": str(movie)}), encoding="utf-8")
+            (work / "processing_manifest.json").write_text(
+                json.dumps({"final": {"video": str(movie)}}), encoding="utf-8")
+            (work / "segments").mkdir()
+            (work / "segments" / "transient.mp4").write_bytes(b"transient")
+
+            _publish_staged_output(work, output, work.parent)
+
+            self.assertEqual((output / movie.name).read_bytes(), b"movie")
+            published = json.loads((output / "processing_manifest.json").read_text())
+            self.assertEqual(published["final"]["video"], str(output / movie.name))
+            self.assertEqual(published["staging"]["mode"], "local_internal")
+            self.assertEqual(published["staging_root"], str(work.parent))
+            self.assertEqual(published["staging_directory"], str(work))
+            self.assertEqual(published["output_directory"], str(output))
+            diagnostic = json.loads((output / "diagnostics" / "frame.json").read_text())
+            self.assertEqual(diagnostic["movie"], str(output / movie.name))
+            self.assertFalse((output / "segments").exists())
+
+    def test_local_staging_cleans_success_and_preserves_failure(self):
+        calibration = load_calibration()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            staging = root / "local-staging"
+            staging.mkdir()
+
+            def successful_core(options, _calibration):
+                movie = options.output_dir / "movie.mp4"
+                movie.write_bytes(b"movie")
+                (options.output_dir / "processing_manifest.json").write_text(
+                    json.dumps({"movie": str(movie)}), encoding="utf-8")
+                return {"movie": str(movie)}
+
+            with patch("grokcam.batch._run_reel_core", side_effect=successful_core):
+                result = run_reel(RunOptions(root, output, staging_dir=staging), calibration)
+            self.assertEqual(result["movie"], str(output / "movie.mp4"))
+            self.assertEqual((output / "movie.mp4").read_bytes(), b"movie")
+            self.assertEqual(list(staging.iterdir()), [])
+
+            def failed_core(_options, _calibration):
+                raise RuntimeError("test failure")
+
+            with patch("grokcam.batch._run_reel_core", side_effect=failed_core), \
+                    self.assertRaisesRegex(RuntimeError, "test failure"):
+                run_reel(RunOptions(root, output, staging_dir=staging), calibration)
+            failure = json.loads((output / ".staging-failure.json").read_text())
+            failed_work = Path(failure["staging_directory"])
+            self.assertTrue(failed_work.is_dir())
+
+    def test_default_staging_root_is_shared_by_regular8_and_super8(self):
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            default_root = root / "default-scratch"
+            default_root.mkdir()
+            seen = []
+
+            def fake_core(options, _calibration):
+                seen.append(options.output_dir)
+                (options.output_dir / "processing_manifest.json").write_text(
+                    json.dumps({}), encoding="utf-8")
+                return {
+                    "render": {"output_video": str(options.output_dir / "movie.mp4")},
+                    "provenance_counts": {},
+                    "consecutive_exclusion_untrusted_runs": [],
+                }
+
+            with patch("grokcam.batch.DEFAULT_STAGING_DIR", default_root), \
+                    patch("grokcam.batch._run_reel_core", side_effect=fake_core):
+                run_reel(RunOptions(root, root / "regular-output"), load_calibration())
+                run_reel(
+                    RunOptions(root, root / "super-output"),
+                    replace(load_calibration(), film_format="super8"),
+                )
+
+            self.assertEqual(len(seen), 2)
+            self.assertTrue(all(path.parent == default_root for path in seen))
+            self.assertTrue(all(not path.exists() for path in seen))
+
+    def test_explicit_staging_root_overrides_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            default_root = root / "default-scratch"
+            override_root = root / "override-scratch"
+            default_root.mkdir()
+            override_root.mkdir()
+
+            def fake_core(options, _calibration):
+                (options.output_dir / "processing_manifest.json").write_text(
+                    json.dumps({}), encoding="utf-8")
+
+            with patch("grokcam.batch.DEFAULT_STAGING_DIR", default_root), \
+                    patch("grokcam.batch._run_reel_core", side_effect=fake_core):
+                run_reel(RunOptions(root, root / "output", staging_dir=override_root),
+                         load_calibration())
+
+            self.assertEqual(list(override_root.iterdir()), [])
+            self.assertEqual(list(default_root.iterdir()), [])
+
+    def test_invalid_default_staging_fails_before_processing_without_output_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing = root / "missing-scratch"
+            output = root / "output"
+            with patch("grokcam.batch.DEFAULT_STAGING_DIR", missing), \
+                    patch("grokcam.batch._run_reel_core") as core:
+                with self.assertRaisesRegex(RuntimeError, "does not exist"):
+                    run_reel(RunOptions(root, output), load_calibration())
+            core.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_unwritable_default_staging_fails_before_processing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            default_root = root / "scratch"
+            default_root.mkdir()
+            with patch("grokcam.batch.DEFAULT_STAGING_DIR", default_root), \
+                    patch("grokcam.batch.os.access", return_value=False), \
+                    patch("grokcam.batch._run_reel_core") as core:
+                with self.assertRaisesRegex(RuntimeError, "not writable"):
+                    run_reel(RunOptions(root, root / "output"), load_calibration())
+            core.assert_not_called()
+
+    def test_super8_completion_is_reported_after_publication(self):
+        from dataclasses import replace
+        events = []
+        calibration = replace(load_calibration(), film_format="super8")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            staging = root / "staging"
+            staging.mkdir()
+            output = root / "output"
+
+            def fake_core(options, _calibration):
+                return {
+                    "render": {"output_video": str(options.output_dir / "movie.mp4")},
+                    "provenance_counts": {"PRIMARY": 1},
+                    "consecutive_exclusion_untrusted_runs": [],
+                }
+
+            def fake_publish(*_args):
+                events.append("published")
+
+            def fake_completion(_summary):
+                events.append("completed")
+
+            with patch("grokcam.batch._run_reel_core", side_effect=fake_core), \
+                    patch("grokcam.batch._publish_staged_output", side_effect=fake_publish), \
+                    patch("grokcam.batch._print_super8_completion", side_effect=fake_completion):
+                run_reel(RunOptions(root, output, staging_dir=staging), calibration)
+
+            self.assertEqual(events, ["published", "completed"])
 
     def test_finalization_records_source_to_encoded_mapping_and_exclusion_run(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,0 +1,43 @@
+{
+  "version": "super8-template-bank-v1",
+  "resource": "super8_template_bank_v1.npz",
+  "resource_sha256": "ac573f8b298faefde9d9e2acd488234392a8636d436d5f4ef2bbf7bdc3ce3a88",
+  "source_experiment": "work/super8/p06-template-fallback",
+  "source_template_manifest_sha256": "7bb58e29f9e48a65106997f2e47869c73739c345c1d7523aa751c76d6725a1c8",
+  "source_script_sha256": "695a30a548b7bef422e0e896f62fcfc4c3cbf4afa2c9abfeb9573dba04abc774",
+  "construction_dataset": {
+    "project": "/mnt/SG1TB/GrokCam/projects/Farmington_YW_Reel_REDO5",
+    "raw_subdirectory": "raw",
+    "frames": "P03 PRIMARY frames 2501-3500 satisfying (frame - 2501) % 10 == 0",
+    "count": 96,
+    "same_physical_reel": true
+  },
+  "patch": {
+    "width": 320,
+    "height": 360,
+    "representations": ["gray", "edge"],
+    "aggregation": "median of aligned trusted patches"
+  },
+  "search": {
+    "x_search": [100, 500],
+    "full_height_y_search": true,
+    "scales": [0.94, 0.97, 1.0, 1.03, 1.06, 1.09],
+    "temporal_y_prior": false,
+    "capture_metadata_dependency": false
+  },
+  "gates": {
+    "winning_score_min": 0.56,
+    "geometry_score_min": 0.35,
+    "representation_agreement_px": 18.0,
+    "competitor_margin_min": 0.045,
+    "competitor_y_separation_px": 24.0,
+    "competitor_x_separation_px": 32.0,
+    "physical_cluster_x_px": 96.0,
+    "physical_cluster_y_px": 80.0,
+    "maximum_distinct_physical_candidates": 1
+  },
+  "crop_calibration": {
+    "validated": false,
+    "status": "registration-only; Super 8 sprocket-to-picture crop geometry is not yet validated"
+  }
+}

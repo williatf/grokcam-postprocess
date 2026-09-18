@@ -5,17 +5,20 @@ from __future__ import annotations
 import concurrent.futures
 import fcntl
 import io
+import json
 import os
 import shutil
+import sys
+import tempfile
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from .config import ProductionCalibration
+from .config import DEFAULT_STAGING_DIR, ProductionCalibration
 from .encoding import (concatenate_segments, encode_segment, file_sha256,
                        verify_video)
 from .image_processing import registered_frame
@@ -45,6 +48,8 @@ class RunOptions:
     ffprobe: Path = Path("/usr/local/bin/ffprobe")
     minimum_free_gib: float = 22.0
     plan_only: bool = False
+    registration_only: bool = False
+    staging_dir: Path | None = None
 
 
 def frame_number(path: Path) -> int:
@@ -208,10 +213,174 @@ def finalize_if_complete(options: RunOptions, dngs: list[Path], manifest: dict,
     return final
 
 
+_STAGING_TRANSIENT_NAMES = {
+    ".pipeline.lock", ".staging", ".super8-staging", "segments", "segments.txt",
+}
+
+
+def _validated_staging_root(options: RunOptions) -> Path:
+    staging_root = (options.staging_dir if options.staging_dir is not None
+                    else DEFAULT_STAGING_DIR).expanduser().resolve()
+    if not staging_root.exists():
+        raise RuntimeError(f"Configured staging directory does not exist: {staging_root}")
+    if not staging_root.is_dir():
+        raise RuntimeError(f"Configured staging path is not a directory: {staging_root}")
+    if not os.access(staging_root, os.W_OK | os.X_OK):
+        raise RuntimeError(f"Configured staging directory is not writable: {staging_root}")
+    return staging_root
+
+
+def _replace_path_prefix(value, source: str, destination: str):
+    if isinstance(value, str):
+        return value.replace(source, destination)
+    if isinstance(value, list):
+        return [_replace_path_prefix(item, source, destination) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_path_prefix(item, source, destination)
+                for key, item in value.items()}
+    return value
+
+
+def _publish_staged_output(work_dir: Path, output_dir: Path,
+                           staging_parent: Path) -> None:
+    """Publish persistent results from a local run directory.
+
+    The production stages intentionally continue to write their normal output
+    names.  This boundary is the only place that knows a run was staged, so
+    the normal no-staging path remains unchanged.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for source in work_dir.iterdir():
+        if source.name in _STAGING_TRANSIENT_NAMES:
+            continue
+        destination = output_dir / source.name
+        if source.is_dir():
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source, destination)
+
+    source_prefix = str(work_dir)
+    destination_prefix = str(output_dir)
+    for relative in (path.relative_to(work_dir) for path in work_dir.rglob("*")):
+        if relative.parts and relative.parts[0] in _STAGING_TRANSIENT_NAMES:
+            continue
+        destination = output_dir / relative
+        if destination.suffix not in {".json", ".jsonl"} or not destination.is_file():
+            continue
+        if destination.suffix == ".json":
+            data = json.loads(destination.read_text(encoding="utf-8"))
+            data = _replace_path_prefix(data, source_prefix, destination_prefix)
+            destination.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        else:
+            text = destination.read_text(encoding="utf-8")
+            destination.write_text(text.replace(source_prefix, destination_prefix),
+                                   encoding="utf-8")
+
+    manifest = output_dir / "processing_manifest.json"
+    if manifest.exists():
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["staging_root"] = str(staging_parent)
+        data["staging_directory"] = str(work_dir)
+        data["output_directory"] = str(output_dir)
+        data["staging"] = {
+            "mode": "local_internal",
+            "parent": str(staging_parent),
+            "cleaned_after_success": True,
+        }
+        manifest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_staging_failure(output_dir: Path, work_dir: Path,
+                           error: BaseException) -> None:
+    """Leave a small NFS-visible pointer while preserving local failed work."""
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / ".staging-failure.json").write_text(
+            json.dumps({
+                "staging_root": str(work_dir.parent),
+                "staging_directory": str(work_dir),
+                "output_directory": str(output_dir),
+                "error_type": type(error).__name__,
+                "error": str(error),
+                "preserved_for_diagnosis": True,
+            }, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        print(f"Could not write staging failure marker in {output_dir}; "
+              f"preserved local staging at {work_dir}", file=sys.stderr)
+
+
+def _print_super8_completion(summary: dict) -> None:
+    render = summary.get("render", {})
+    print(f"Complete and verified: {render.get('output_video')}", flush=True)
+    counts = summary.get("provenance_counts", {})
+    print("Registration summary: " + ", ".join(
+        f"{name}={counts.get(name, 0)}" for name in
+        ("PRIMARY", "SECONDARY", "FALLBACK", "TEMPLATE_FALLBACK",
+         "INTERPOLATED", "UNTRUSTED")), flush=True)
+    print("Consecutive exclusion/untrusted runs: " +
+          str(summary.get("consecutive_exclusion_untrusted_runs", [])), flush=True)
+
+
 def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
+    """Run production, optionally isolating all transient output locally."""
+    staging_parent = _validated_staging_root(options)
+    output_dir = options.output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    final_lock = (output_dir / ".pipeline.lock").open("a")
+    try:
+        try:
+            fcntl.flock(final_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit(f"Another pipeline process is already using {output_dir}")
+        work_dir = Path(tempfile.mkdtemp(
+            prefix=f"grokcam-{calibration.film_format}-", dir=staging_parent))
+        succeeded = False
+        working_options = replace(
+            options, raw_dir=options.raw_dir, output_dir=work_dir, staging_dir=None)
+        result = _run_reel_core(working_options, calibration)
+        _publish_staged_output(work_dir, output_dir, staging_parent)
+        succeeded = True
+        published_result = _replace_path_prefix(result, str(work_dir), str(output_dir))
+        if calibration.film_format == "super8" and not options.registration_only:
+            _print_super8_completion(published_result)
+        return published_result
+    except BaseException as error:
+        if "work_dir" in locals():
+            _write_staging_failure(output_dir, work_dir, error)
+            print(f"Preserving failed local staging at {work_dir}", file=sys.stderr)
+        raise
+    finally:
+        if "work_dir" in locals() and succeeded and work_dir.exists():
+            shutil.rmtree(work_dir)
+        final_lock.close()
+
+
+def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> None:
     raw_dir = options.raw_dir.expanduser().resolve()
+    if (raw_dir / "raw").is_dir():
+        raw_dir = raw_dir / "raw"
     output_dir = options.output_dir.expanduser().resolve()
     options = RunOptions(**{**options.__dict__, "raw_dir": raw_dir, "output_dir": output_dir})
+    if calibration.film_format == "super8":
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if options.registration_only:
+            dngs = select_dngs(options)
+            free_gib = shutil.disk_usage(output_dir).free / 2**30
+            if free_gib < options.minimum_free_gib:
+                raise RuntimeError(f"Stopping safely: only {free_gib:.1f} GiB free")
+            from .super8_audit import run_registration_audit
+            return run_registration_audit(dngs, output_dir, calibration, options.jobs)
+        if not calibration.super8_registration.crop_validated:
+            raise RuntimeError(
+                "Super 8 movie rendering requires an empirically validated crop calibration; "
+                "run with --registration-only until calibration is reviewed"
+            )
+        dngs = select_dngs(options)
+        free_gib = shutil.disk_usage(output_dir).free / 2**30
+        if free_gib < options.minimum_free_gib:
+            raise RuntimeError(f"Stopping safely: only {free_gib:.1f} GiB free")
+        from .super8_audit import run_super8_batch_production
+        return run_super8_batch_production(dngs, output_dir, calibration, options)
     if (calibration.sprocket_detector_mode == "physical-p07-v1" and
             calibration.vertical_stabilization.enabled):
         raise SystemExit("physical-p07-v1 uses frozen P15/P07/P22 registration and cannot enable residual vertical stabilization")

@@ -27,6 +27,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--ffmpeg", type=Path, default=Path(ffmpeg))
     result.add_argument("--ffprobe", type=Path, default=Path(ffprobe))
     result.add_argument("--minimum-free-gib", type=float, default=22.0)
+    result.add_argument("--staging-dir", type=Path,
+                        help="local parent directory for per-render transient staging")
     result.add_argument("--plan-only", action="store_true", help="show the restart plan without processing")
     result.add_argument("--dry-run", action="store_true", help="alias for --plan-only")
     result.add_argument("--calibration", type=Path, help="optional JSON calibration overrides")
@@ -35,6 +37,10 @@ def parser() -> argparse.ArgumentParser:
                         help="enable second-stage physical vertical registration")
     result.add_argument("--sprocket-detector-mode", choices=["legacy", "physical-p07-v1"],
                         help="versioned primary-registration cascade (default from calibration)")
+    result.add_argument("--film-format", choices=["regular8", "super8"],
+                        help="film-format strategy (default from calibration)")
+    result.add_argument("--registration-only", action="store_true",
+                        help="run registration and audit manifests without crop/render/encode")
     return result
 
 
@@ -48,11 +54,14 @@ def main() -> None:
         )
     if args.sprocket_detector_mode:
         calibration = replace(calibration, sprocket_detector_mode=args.sprocket_detector_mode)
+    if args.film_format:
+        calibration = replace(calibration, film_format=args.film_format)
     options = RunOptions(
         raw_dir=args.raw_dir, output_dir=args.output_dir, first=args.first, last=args.last,
         batch_frames=args.batch_frames, fps=args.fps, jobs=args.jobs,
         ffmpeg=args.ffmpeg, ffprobe=args.ffprobe, minimum_free_gib=args.minimum_free_gib,
-        plan_only=args.plan_only or args.dry_run,
+        plan_only=args.plan_only or args.dry_run, registration_only=args.registration_only,
+        staging_dir=args.staging_dir,
     )
     ProductionPipeline(calibration).process_reel(options)
 
