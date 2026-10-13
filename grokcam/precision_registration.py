@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from .config import Regular8CaptureGeometry
 from .models import CropGeometry, SprocketDetection
 from .physical_sprocket import (FROZEN_CONFIG, PhysicalPairResult, _p06_fit,
                                 _pair_candidate, _physical_hole, capture_boxes,
@@ -114,14 +115,21 @@ def _measure_edge(gray, expected_y):
             "subpixel_fraction": sum(column["subpixel"] for column in inliers) / len(inliers)}
 
 
-def measure_p15_lower_top(image: Image.Image, anchor_x: float, anchor_y: float) -> dict:
-    """Exact frozen P15 lower-top measurement; the primary anchor only places its ROI."""
-    upper_x = anchor_x + 17.125 - LOWER_X / 2
-    lower_x = upper_x + LOWER_X
-    lower_y = anchor_y - PITCH / 2 + PITCH
-    expected = lower_y - HEIGHT / 2
-    x0 = max(0, int(lower_x - WIDTH * P15_CONFIG["horizontal_half_fraction"]))
-    x1 = min(image.width, int(lower_x + WIDTH * P15_CONFIG["horizontal_half_fraction"]))
+def measure_p15_lower_top(image: Image.Image, anchor_x: float, anchor_y: float,
+                          geometry: Regular8CaptureGeometry | None = None) -> dict:
+    """Measure the lower edge using defaults or validated capture geometry."""
+    if geometry is None:
+        upper_x = anchor_x + 17.125 - LOWER_X / 2
+        lower_x = upper_x + LOWER_X
+        lower_y = anchor_y - PITCH / 2 + PITCH
+        expected = lower_y - HEIGHT / 2
+        width = WIDTH
+    else:
+        lower_x = anchor_x + geometry.lower_x_minus_midpoint_px
+        expected = anchor_y + geometry.lower_top_minus_midpoint_px
+        width = geometry.sprocket_width_px
+    x0 = max(0, int(lower_x - width * P15_CONFIG["horizontal_half_fraction"]))
+    x1 = min(image.width, int(lower_x + width * P15_CONFIG["horizontal_half_fraction"]))
     y0 = max(0, int(expected - P15_CONFIG["search_radius_px"] - 5))
     y1 = min(image.height, int(expected + P15_CONFIG["search_radius_px"] + 6))
     gray = cv2.cvtColor(np.asarray(image.crop((x0, y0, x1, y1)).convert("RGB")),
@@ -135,8 +143,10 @@ def measure_p15_lower_top(image: Image.Image, anchor_x: float, anchor_y: float) 
 
 
 def evaluate_p24_guide(image: Image.Image, capture_item, timings: dict,
-                       counters: dict) -> tuple[tuple[float, float] | None, dict]:
-    """Apply the exact frozen P24 gate and P25 X calibration; never register directly."""
+                       counters: dict,
+                       geometry: Regular8CaptureGeometry | None = None
+                       ) -> tuple[tuple[float, float] | None, dict]:
+    """Apply P24 capture/physical corroboration; never register directly."""
     counters["p24_attempts"] += 1
     started = time.perf_counter()
     boxes = capture_boxes(capture_item)
@@ -150,24 +160,55 @@ def evaluate_p24_guide(image: Image.Image, capture_item, timings: dict,
         upper, lower = sorted(boxes, key=lambda box: box[1])
         pitch = lower[1] - upper[1]; x_displacement = lower[0] - upper[0]
         height_difference = abs(lower[3] - upper[3])
-        raw_y = (upper[1] + lower[1]) / 2 + PITCH / 2 - HEIGHT / 2
-        raw_x = (upper[0] + lower[0]) / 2 - 17.125
-        predicates = {
-            "pair_present": True,
-            "pitch": P24_PITCH_RANGE[0] <= pitch <= P24_PITCH_RANGE[1],
-            "widths": upper[2] >= P24_WIDTH_MIN and lower[2] >= P24_WIDTH_MIN,
-            "heights": all(P24_HEIGHT_RANGE[0] <= box[3] <= P24_HEIGHT_RANGE[1]
-                           for box in (upper, lower)),
-            "height_difference": height_difference >= P24_HEIGHT_DIFFERENCE_MIN,
-            "x_displacement": abs(x_displacement) <= P24_X_DISPLACEMENT_MAX,
-        }
+        midpoint_x = (upper[0] + lower[0]) / 2
+        midpoint_y = (upper[1] + lower[1]) / 2
+        if geometry is None:
+            raw_y = midpoint_y + PITCH / 2 - HEIGHT / 2
+            raw_x = midpoint_x - 17.125
+            predicates = {
+                "pair_present": True,
+                "pitch": P24_PITCH_RANGE[0] <= pitch <= P24_PITCH_RANGE[1],
+                "widths": upper[2] >= P24_WIDTH_MIN and lower[2] >= P24_WIDTH_MIN,
+                "heights": all(P24_HEIGHT_RANGE[0] <= box[3] <= P24_HEIGHT_RANGE[1]
+                               for box in (upper, lower)),
+                "height_difference": height_difference >= P24_HEIGHT_DIFFERENCE_MIN,
+                "x_displacement": abs(x_displacement) <= P24_X_DISPLACEMENT_MAX,
+            }
+        else:
+            def band(center: float, mad: float, floor: float) -> tuple[float, float]:
+                width = max(floor, 4.0 * mad)
+                return center - width, center + width
+            pitch_band = band(geometry.p24_capture_pitch_px,
+                              geometry.p24_capture_pitch_mad_px, 6.0)
+            width_band = band(geometry.p24_capture_width_px,
+                              geometry.p24_capture_width_mad_px, 12.0)
+            height_band = band(geometry.p24_capture_height_px,
+                               geometry.p24_capture_height_mad_px, 12.0)
+            x_band = band(geometry.p24_capture_x_displacement_px,
+                          geometry.p24_capture_x_displacement_mad_px, 6.0)
+            raw_y = midpoint_y + geometry.p24_capture_lower_top_minus_midpoint_px
+            raw_x = midpoint_x
+            predicates = {
+                "pair_present": True,
+                "pitch": pitch_band[0] <= pitch <= pitch_band[1],
+                "widths": all(width_band[0] <= box[2] <= width_band[1]
+                               for box in (upper, lower)),
+                "heights": all(height_band[0] <= box[3] <= height_band[1]
+                               for box in (upper, lower)),
+                # Equal paired ROI heights are the measured Jan/Wendy geometry,
+                # not a failure of physical Regular 8 evidence.
+                "height_difference": True,
+                "x_displacement": x_band[0] <= x_displacement <= x_band[1],
+            }
         detail.update({"capture_upper": list(upper), "capture_lower": list(lower),
                        "capture_pitch": pitch, "capture_x_displacement": x_displacement,
                        "capture_height_difference": height_difference,
                        "raw_capture_anchor_x": raw_x,
-                       "calibrated_capture_anchor_x": raw_x - P25_CAPTURE_X_BIAS,
+                       "calibrated_capture_anchor_x": (raw_x - P25_CAPTURE_X_BIAS
+                                                        if geometry is None else raw_x),
                        "raw_capture_lower_top_y": raw_y,
-                       "calibrated_capture_lower_top_y": raw_y - P24_CAPTURE_Y_BIAS,
+                       "calibrated_capture_lower_top_y": (raw_y - P24_CAPTURE_Y_BIAS
+                                                           if geometry is None else raw_y),
                        "capture_predicates": predicates})
     else:
         predicates = {"pair_present": False, "pitch": False, "widths": False,
@@ -194,8 +235,14 @@ def evaluate_p24_guide(image: Image.Image, capture_item, timings: dict,
     if pair_available:
         counters["p24_physical_corroborator_available"] += 1
         upper_hole, lower_hole = sorted(holes, key=lambda hole: hole.cy)
-        raw_physical_y = (upper_hole.cy + lower_hole.cy) / 2 + PITCH / 2 - HEIGHT / 2
-        physical_y = raw_physical_y - P24_PHYSICAL_Y_BIAS
+        if geometry is None:
+            raw_physical_y = (upper_hole.cy + lower_hole.cy) / 2 + PITCH / 2 - HEIGHT / 2
+            physical_y = raw_physical_y - P24_PHYSICAL_Y_BIAS
+        else:
+            # With calibrated geometry the physical corroborator is compared
+            # directly in the observed lower-hole-edge coordinate system.
+            raw_physical_y = lower_hole.cy - lower_hole.height / 2
+            physical_y = raw_physical_y
         disagreement = abs(detail["calibrated_capture_lower_top_y"] - physical_y)
         corroboration = {
             "upper_fit_score": upper_hole.score <= P24_PHYSICAL_SCORE_MAX,
@@ -222,7 +269,9 @@ def evaluate_p24_guide(image: Image.Image, capture_item, timings: dict,
         return None, detail
     detail["disposition"] = "p24_admitted"
     anchor_x = detail["calibrated_capture_anchor_x"]
-    anchor_y = detail["calibrated_capture_lower_top_y"] - (PITCH / 2 - HEIGHT / 2)
+    anchor_y = (detail["calibrated_capture_lower_top_y"] -
+                (PITCH / 2 - HEIGHT / 2) if geometry is None else
+                (upper[1] + lower[1]) / 2)
     return (anchor_x, anchor_y), detail
 
 
@@ -295,15 +344,20 @@ def refine_p22_common_y(image: Image.Image, upper_x: float, upper_y: float,
 
 
 def register_precisely(image: Image.Image, primary: SprocketDetection | None,
-                       capture_item, timings: dict, counters: dict) -> RegistrationResult:
+                       capture_item, timings: dict, counters: dict,
+                       geometry: Regular8CaptureGeometry | None = None
+                       ) -> RegistrationResult:
     """Apply primary/P15 -> frozen P24/P25/P15 -> frozen P07/P22."""
     counters["frames"] += 1; counters["p15_attempts"] += 1
     started = time.perf_counter()
     if primary is None:
         p15 = {"valid": False, "y": None, "reason": "no_primary_roi_anchor"}
+    elif not primary.accepted and geometry is not None:
+        p15 = {"valid": False, "y": None, "reason": "primary_batch_rejected",
+               "primary_rejected_anchor": primary.to_dict()}
     else:
         counters["primary_p15_attempts"] += 1
-        p15 = measure_p15_lower_top(image, primary.cx, primary.cy)
+        p15 = measure_p15_lower_top(image, primary.cx, primary.cy, geometry)
     elapsed=time.perf_counter()-started;timings["primary_p15_measurement"]+=elapsed;timings["p15_measurement"]+=elapsed
     if p15["valid"]:
         counters["p15_successes"] += 1; counters["primary_p15_successes"] += 1
@@ -320,10 +374,10 @@ def register_precisely(image: Image.Image, primary: SprocketDetection | None,
                                    "p07_attempted": False,
                                    "p22_attempted": False})
 
-    guide, p24 = evaluate_p24_guide(image, capture_item, timings, counters)
+    guide, p24 = evaluate_p24_guide(image, capture_item, timings, counters, geometry)
     if guide is not None:
         counters["p24_guided_p15_attempts"] += 1; started=time.perf_counter()
-        p24_p15=measure_p15_lower_top(image, *guide)
+        p24_p15=measure_p15_lower_top(image, *guide, geometry)
         elapsed=time.perf_counter()-started;timings["p24_guided_p15_measurement"]+=elapsed;timings["p15_measurement"]+=elapsed
         p24["p15"] = p24_p15; p24["guide_anchor_x"],p24["guide_anchor_y"]=guide
         p24["guide_expected_lower_top_y"]=p24_p15.get("expected_y")

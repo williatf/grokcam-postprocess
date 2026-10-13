@@ -57,12 +57,24 @@ def atomic_json(path: Path, value: dict) -> None:
 
 
 def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batch_frames: int,
-                   calibration: ProductionCalibration, ffmpeg: Path) -> dict:
+                   calibration: ProductionCalibration, ffmpeg: Path,
+                   output_name: str | None = None,
+                   capture_geometry_source: str = "regular8_default") -> dict:
     expected_failure_policy = ("primary_p15_p24_p25_p15_p07_p22_exclude" if
                                calibration.sprocket_detector_mode == DETECTOR_MODE else
                                "legacy_interpolation")
     if path.exists():
         manifest = json.loads(path.read_text(encoding="utf-8"))
+        recorded_geometry = manifest.get("capture_geometry")
+        current_geometry = (None if calibration.capture_geometry is None else
+                            calibration.capture_geometry.to_dict())
+        if recorded_geometry != current_geometry:
+            raise RuntimeError(
+                "Cannot resume an output directory with different capture geometry"
+            )
+        recorded_output_name = manifest.get("output_name")
+        if recorded_output_name is not None and recorded_output_name != output_name:
+            raise RuntimeError("Cannot resume an output directory with a different output name")
         recorded_mode = manifest.get("sprocket_registration", {}).get("mode", "legacy")
         if recorded_mode != calibration.sprocket_detector_mode:
             raise RuntimeError("Cannot resume an output directory with a different sprocket detector mode/version")
@@ -84,6 +96,7 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
                 "Cannot resume an output directory with a different vertical-stabilization mode"
             )
         manifest.setdefault("batch_history", []).append({"started": utc_now(), "batch_frames": batch_frames})
+        manifest.setdefault("capture_geometry_source", capture_geometry_source)
         return manifest
     match_path = calibration.match.report.expanduser().resolve()
     match_bytes = match_path.read_bytes()
@@ -92,7 +105,7 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
         "pipeline": PIPELINE_ID, "version": __version__,
         "created": utc_now(), "raw_dir": str(raw_dir), "source_policy": "read_only",
         "frame_range": [numbers[0], numbers[-1]], "frame_count": len(numbers),
-        "fps": fps, "batch_frames": batch_frames,
+        "fps": fps, "batch_frames": batch_frames, "output_name": output_name,
         "raw_development_calibration": {
             "path": str(match_path), "sha256": hashlib.sha256(match_bytes).hexdigest(),
             "model": match_report.get("fit", {}).get("model"),
@@ -103,6 +116,9 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
         "crop_preset": "loose", "crop": {
             "x_offset": calibration.crop.x_offset, "y_offset": calibration.crop.y_offset,
             "width": calibration.crop.width, "height": calibration.crop.height},
+        "capture_geometry": (None if calibration.capture_geometry is None else
+                              calibration.capture_geometry.to_dict()),
+        "capture_geometry_source": capture_geometry_source,
         "sprocket_registration": {
             "mode": calibration.sprocket_detector_mode,
             "physical_detector_version": DETECTOR_MODE if calibration.sprocket_detector_mode == DETECTOR_MODE else None,

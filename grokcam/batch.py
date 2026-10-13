@@ -29,7 +29,7 @@ from .precision_registration import register_precisely
 from .raw_development import DarktableMatchedDeveloper
 from .registration import crop_for_detection
 from .resume import completed_frame_numbers, contiguous_batches
-from .sprocket_detection import detect, validate_batch
+from .sprocket_detection import _batch_acceptance, detect, validate_batch
 from .timing import timed
 from .vertical_stabilization import (measure_frame, measurement_details,
                                      resolve_batch, verify_post_crop)
@@ -484,6 +484,17 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                         measured.append(detect(image, calibration.detector))
                     except ValueError:
                         measured.append(None)
+        registration_primary = measured
+        if calibration.capture_geometry is not None:
+            # The new geometry was validated with the established batch gate.
+            # Keep the legacy no-geometry path byte-for-byte in its prior
+            # single-frame behavior for backward compatibility.
+            _, _, batch_accepted = _batch_acceptance(measured, calibration.detector)
+            registration_primary = [
+                None if detection is None else replace(
+                    detection, accepted=bool(batch_accepted[index]))
+                for index, detection in enumerate(measured)
+            ]
         physical_details = [{} for _ in measured]
         precise_results = None
         if calibration.sprocket_detector_mode == "physical-p07-v1":
@@ -491,8 +502,8 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
             for index, dng in enumerate(batch):
                 with Image.open(tiffs / f"{dng.stem}.tif") as image:
                     result = register_precisely(
-                        image, measured[index], capture_metadata.get(frame_number(dng)),
-                        timings, registration_counts,
+                        image, registration_primary[index], capture_metadata.get(frame_number(dng)),
+                        timings, registration_counts, calibration.capture_geometry,
                     )
                 precise_results.append(result)
                 physical_details[index] = result.diagnostics
