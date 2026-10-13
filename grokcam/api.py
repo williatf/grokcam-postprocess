@@ -128,6 +128,7 @@ class ProcessingConfig:
     raw_jobs: int = 3
     output_name: str | None = None
     capture_geometry_path: Path | None = None
+    sprocket_detector: str | None = None
 
     def __post_init__(self) -> None:
         if self.source_path is None or not str(self.source_path).strip():
@@ -141,6 +142,14 @@ class ProcessingConfig:
         if self.capture_geometry_path is not None:
             object.__setattr__(self, "capture_geometry_path",
                                Path(self.capture_geometry_path).expanduser())
+        if self.sprocket_detector is not None and (
+                not isinstance(self.sprocket_detector, str) or
+                not self.sprocket_detector.strip()):
+            raise ValueError("sprocket_detector must be a non-empty detector ID or None")
+        if self.sprocket_detector is not None:
+            from .detectors.registry import detector_registered
+            if not detector_registered(self.sprocket_detector):
+                raise ValueError(f"unknown sprocket detector: {self.sprocket_detector}")
         if not isinstance(self.calibration_id, str) or not self.calibration_id.strip():
             raise ValueError("calibration_id is required")
         if self.film_format not in SUPPORTED_FILM_FORMATS:
@@ -699,6 +708,9 @@ def process_reel(config: ProcessingConfig, event_sink: Callable[[ProcessingProgr
                 details={"film_formats": list(calibration_info.film_formats)},
             )
         calibration = load_calibration(calibration_info.config_path)
+        if config.sprocket_detector is not None:
+            calibration = replace(calibration,
+                                  sprocket_detector_id=config.sprocket_detector)
         capture_geometry_source = (
             "super8_default" if config.film_format == "super8" else "regular8_default"
         )
@@ -732,6 +744,7 @@ def process_reel(config: ProcessingConfig, event_sink: Callable[[ProcessingProgr
             "total_batches": batches,
             "film_format": config.film_format,
             "calibration_id": config.calibration_id,
+            "sprocket_detector": calibration.sprocket_detector_id,
             "capture_geometry_path": (None if config.capture_geometry_path is None else
                                        str(config.capture_geometry_path)),
             "capture_geometry_source": capture_geometry_source,

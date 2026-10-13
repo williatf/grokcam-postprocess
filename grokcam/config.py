@@ -262,6 +262,11 @@ class ProductionCalibration:
     # Output orientation is a rendering property.  Detection and registration
     # always operate in the native developed-image coordinate system.
     vertical_flip: bool = True
+    # Primary detector and registration policy are independent choices. The
+    # legacy attribute below remains the Python attribute and legacy JSON
+    # input alias for registration selection.
+    sprocket_detector_id: str = "adaptive-v1"
+    sprocket_detector_options: dict = field(default_factory=dict)
     sprocket_detector_mode: str = "physical-p07-v1"
     contrast: float = 1.04
     picture_aperture_x: tuple[float, float] = (0.15, 0.92)
@@ -272,6 +277,12 @@ class ProductionCalibration:
     def to_dict(self) -> dict:
         value = asdict(self)
         value["match"]["report"] = str(self.match.report)
+        detector_id = value.pop("sprocket_detector_id")
+        detector_options = value.pop("sprocket_detector_options")
+        registration = value.pop("sprocket_detector_mode")
+        value["sprocket"] = {"detector": detector_id, "registration": registration}
+        if detector_options:
+            value["sprocket"]["options"] = detector_options
         return value
 
 
@@ -280,7 +291,7 @@ def load_calibration(path: Path | None = None, match_report: Path | None = None)
     calibration = ProductionCalibration()
     if path is not None:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        allowed = {"detector", "crop", "match", "capture_geometry", "vertical_stabilization", "super8_registration", "film_format", "vertical_flip", "sprocket_detector_mode", "contrast", "picture_aperture_x",
+        allowed = {"detector", "crop", "match", "capture_geometry", "vertical_stabilization", "super8_registration", "film_format", "vertical_flip", "sprocket_detector_mode", "sprocket", "contrast", "picture_aperture_x",
                    "picture_aperture_y", "exposure_limit_stops", "white_balance_blend"}
         unknown = set(raw) - allowed
         if unknown:
@@ -302,15 +313,36 @@ def load_calibration(path: Path | None = None, match_report: Path | None = None)
         if "template_metadata" in super8_values:
             super8_values = {**super8_values, "template_metadata": Path(super8_values["template_metadata"])}
         super8 = replace(calibration.super8_registration, **super8_values)
+        sprocket = raw.get("sprocket", {})
+        if not isinstance(sprocket, dict):
+            raise ValueError("sprocket must be a JSON object")
+        unknown_sprocket = set(sprocket) - {"detector", "registration", "options"}
+        if unknown_sprocket:
+            raise ValueError("unknown sprocket keys: " + ", ".join(sorted(unknown_sprocket)))
+        detector_id = sprocket.get("detector", calibration.sprocket_detector_id)
+        detector_options = sprocket.get("options", calibration.sprocket_detector_options)
+        if not isinstance(detector_options, dict):
+            raise ValueError("sprocket.options must be a JSON object")
+        registration = sprocket.get("registration", raw.get(
+            "sprocket_detector_mode", calibration.sprocket_detector_mode))
+        if ("registration" in sprocket and "sprocket_detector_mode" in raw and
+                sprocket["registration"] != raw["sprocket_detector_mode"]):
+            raise ValueError("sprocket.registration conflicts with sprocket_detector_mode")
         scalar = {k: v for k, v in raw.items()
-                  if k not in {"detector", "crop", "match", "capture_geometry", "vertical_stabilization", "super8_registration"}}
+                  if k not in {"detector", "crop", "match", "capture_geometry", "vertical_stabilization", "super8_registration", "sprocket", "sprocket_detector_mode"}}
         calibration = replace(calibration, detector=detector, crop=crop, match=match,
                               capture_geometry=geometry,
-                              vertical_stabilization=vertical, super8_registration=super8, **scalar)
+                              vertical_stabilization=vertical, super8_registration=super8,
+                              sprocket_detector_id=detector_id,
+                              sprocket_detector_options=dict(detector_options),
+                              sprocket_detector_mode=registration, **scalar)
     if calibration.film_format not in {"regular8", "super8"}:
         raise ValueError("film_format must be regular8 or super8")
     if calibration.sprocket_detector_mode not in {"legacy", "physical-p07-v1"}:
         raise ValueError("sprocket_detector_mode must be legacy or physical-p07-v1")
+    from .detectors.registry import detector_registered
+    if not detector_registered(calibration.sprocket_detector_id):
+        raise ValueError(f"unknown sprocket detector: {calibration.sprocket_detector_id}")
     if match_report is not None:
         calibration = replace(calibration, match=MatchCalibration(match_report))
     return calibration

@@ -15,6 +15,7 @@ from grokcam.api import ProcessingConfig, list_calibrations, process_reel
 from grokcam.batch import RunOptions
 from grokcam.config import (Regular8CaptureGeometry, load_calibration,
                             load_capture_geometry)
+from grokcam.detectors.registry import registered_detectors
 from grokcam.pipeline import ProductionPipeline
 
 
@@ -44,7 +45,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--vertical-stabilization", action="store_true",
                         help="enable second-stage physical vertical registration")
     result.add_argument("--sprocket-detector-mode", choices=["legacy", "physical-p07-v1"],
-                        help="versioned primary-registration cascade (default from calibration)")
+                        help="registration algorithm (default from calibration)")
+    result.add_argument("--sprocket-detector", choices=registered_detectors(),
+                        help="primary detector ID (default from calibration; currently adaptive-v1)")
     result.add_argument("--film-format", choices=["regular8", "super8"],
                         help="film-format strategy (default from calibration)")
     result.add_argument("--registration-only", action="store_true",
@@ -88,6 +91,7 @@ def main() -> None:
             raw_jobs=args.jobs,
             output_name=args.output_name,
             capture_geometry_path=args.capture_geometry,
+            sprocket_detector=args.sprocket_detector,
         )
         output = sys.stdout
         write_lock = threading.Lock()
@@ -134,6 +138,8 @@ def main() -> None:
         )
     if args.sprocket_detector_mode:
         calibration = replace(calibration, sprocket_detector_mode=args.sprocket_detector_mode)
+    if args.sprocket_detector:
+        calibration = replace(calibration, sprocket_detector_id=args.sprocket_detector)
     if args.film_format:
         calibration = replace(calibration, film_format=args.film_format)
     if args.capture_geometry is not None and calibration.film_format != "regular8":

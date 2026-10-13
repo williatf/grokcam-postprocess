@@ -204,7 +204,7 @@ class CaptureGeometryTests(unittest.TestCase):
                 438.0, 1065.0, {},
             )
             with patch("grokcam.batch.DarktableMatchedDeveloper", FakeDeveloper), \
-                    patch("grokcam.batch.detect",
+                    patch("grokcam.detectors.adaptive.detect_luminance_pair",
                           return_value=SprocketDetection(438.0, 820.0, 1.0)), \
                     patch("grokcam.batch.register_precisely", return_value=registration), \
                     patch("grokcam.batch.normalize_frames", side_effect=fake_normalize), \
@@ -214,6 +214,13 @@ class CaptureGeometryTests(unittest.TestCase):
                     patch("grokcam.batch.concatenate_segments", side_effect=fake_concat), \
                     patch("grokcam.physical_sprocket.load_capture_metadata", return_value={}):
                 _run_reel_core(options, load_calibration())
+
+            manifest = json.loads((output / "processing_manifest.json").read_text())
+            segment = manifest["segments"][0]
+            self.assertEqual(segment["sprocket_detector_checkpoint"]["name"], "adaptive-v1")
+            self.assertEqual(segment["sprocket_detector_checkpoint"]["state"], {})
+            self.assertEqual(segment["frame_records"][0]["sprocket_detector_diagnostics"]["detector"],
+                             "adaptive-v1")
 
             progress = [event for event in events if event.event == "registration_progress"]
             self.assertEqual(len(progress), 2)

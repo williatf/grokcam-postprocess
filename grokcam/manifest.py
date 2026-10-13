@@ -14,6 +14,7 @@ from PIL import Image
 
 from . import __version__
 from .config import ProductionCalibration
+from .detectors.registry import create_detector, detector_identity
 from .encoding import tool_version
 from .precision_registration import (MODEL_TO_OPTICAL_OFFSET_Y,
                                      OPTICAL_LOWER_TOP_TO_CROP_TOP,
@@ -59,10 +60,15 @@ def atomic_json(path: Path, value: dict) -> None:
 def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batch_frames: int,
                    calibration: ProductionCalibration, ffmpeg: Path,
                    output_name: str | None = None,
-                   capture_geometry_source: str = "regular8_default") -> dict:
+                   capture_geometry_source: str = "regular8_default",
+                   sprocket_detector=None) -> dict:
     expected_failure_policy = ("primary_p15_p24_p25_p15_p07_p22_exclude" if
                                calibration.sprocket_detector_mode == DETECTOR_MODE else
                                "legacy_interpolation")
+    selected_detector = (sprocket_detector or create_detector(
+        calibration.sprocket_detector_id, calibration.detector,
+        calibration.sprocket_detector_options))
+    expected_detector = detector_identity(selected_detector)
     if path.exists():
         manifest = json.loads(path.read_text(encoding="utf-8"))
         recorded_geometry = manifest.get("capture_geometry")
@@ -90,6 +96,24 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
             "failure_policy", "legacy_interpolation")
         if recorded_policy != expected_failure_policy:
             raise RuntimeError("Cannot resume with a different registration failure policy")
+        recorded_detector = manifest.get("sprocket_detection")
+        if recorded_detector is None:
+            # Historical manifests predate detector selection. Their only
+            # supported primary is the existing stateless detector, so upgrade
+            # them in place without changing the old resume path.
+            if expected_detector["name"] != "adaptive-v1":
+                raise RuntimeError(
+                    "Cannot resume with a different sprocket detector: existing "
+                    "manifest does not record a detector identity"
+                )
+            manifest["sprocket_detection"] = expected_detector
+        else:
+            for key in ("name", "version", "configuration_sha256", "stateful"):
+                if recorded_detector.get(key) != expected_detector[key]:
+                    raise RuntimeError(
+                        f"Cannot resume with a different sprocket detector ({key})"
+                    )
+            manifest["sprocket_detection"] = expected_detector
         recorded_vertical = manifest.get("vertical_stabilization", {}).get("enabled", False)
         if recorded_vertical != calibration.vertical_stabilization.enabled:
             raise RuntimeError(
@@ -151,6 +175,7 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
             "optical_lower_top_to_crop_top": OPTICAL_LOWER_TOP_TO_CROP_TOP if calibration.sprocket_detector_mode == DETECTOR_MODE else None,
             "residual_vertical_stabilization": "prohibited" if calibration.sprocket_detector_mode == DETECTOR_MODE else "configured_separately",
         },
+        "sprocket_detection": expected_detector,
         "vertical_stabilization": {
             "enabled": calibration.vertical_stabilization.enabled,
             "top_reference_y": calibration.vertical_stabilization.top_reference_y,

@@ -70,6 +70,11 @@ default `physical-p07-v1` or rollback-only `legacy`; either must use an output
 directory whose manifest has the same recorded policy. Residual vertical
 registration is available only in legacy mode.
 
+Primary detection is selected independently with `--sprocket-detector` or the
+`sprocket.detector` calibration key. `adaptive-v1` is the current and default
+detector. See [sprocket detector architecture](docs/sprocket-detectors.md) for
+the detector interface, diagnostics, and stateful resume checkpoints.
+
 Enable it for a new output directory with:
 
 ```bash

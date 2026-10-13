@@ -196,6 +196,12 @@ class ApiTests(unittest.TestCase):
             ProcessingConfig("source", "output", "calibration", "super8", fps=0)
         with self.assertRaises(ValueError):
             ProcessingConfig("source", "output", "calibration", "regular8", first_frame=4, last_frame=3)
+        selected = ProcessingConfig("source", "output", "calibration", "regular8",
+                                    sprocket_detector="adaptive-v1")
+        self.assertEqual(selected.to_dict()["sprocket_detector"], "adaptive-v1")
+        with self.assertRaisesRegex(ValueError, "unknown sprocket detector"):
+            ProcessingConfig("source", "output", "calibration", "regular8",
+                             sprocket_detector="not-registered")
 
     def test_process_result_and_events_are_structured(self):
         with tempfile.TemporaryDirectory() as directory:

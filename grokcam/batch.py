@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import fcntl
 import io
 import json
@@ -30,10 +31,12 @@ from .precision_registration import register_precisely
 from .raw_development import DarktableMatchedDeveloper
 from .registration import crop_for_detection
 from .resume import completed_frame_numbers, contiguous_batches
-from .sprocket_detection import _batch_acceptance, detect, validate_batch
+from .sprocket_detection import _batch_acceptance, validate_batch
 from .timing import timed
 from .vertical_stabilization import (measure_frame, measurement_details,
                                      resolve_batch, verify_post_crop)
+from .detectors.registry import (create_detector, detector_checkpoint,
+                                 restore_state_before_frame)
 
 
 @dataclass(frozen=True)
@@ -452,10 +455,15 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
         raise SystemExit(f"Only {free_gib:.1f} GiB free; need {options.minimum_free_gib:.1f} GiB")
 
     manifest_path = output_dir / "processing_manifest.json"
+    primary_detector = create_detector(calibration.sprocket_detector_id,
+                                       calibration.detector,
+                                       calibration.sprocket_detector_options)
+    initial_detector_state = copy.deepcopy(primary_detector.get_state())
     manifest = load_or_create(manifest_path, raw_dir, numbers, options.fps,
                               options.batch_frames, calibration, options.ffmpeg,
                               options.output_name,
-                              options.capture_geometry_source)
+                              options.capture_geometry_source,
+                              sprocket_detector=primary_detector)
     completed_segments, batches = remaining_batches(dngs, manifest, options.batch_frames)
     remaining_count = sum(len(batch) for batch in batches)
     if completed_segments:
@@ -477,6 +485,8 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
         timings: dict[str, float] = defaultdict(float)
         registration_counts: dict[str, int] = defaultdict(int)
         first, last = frame_number(batch[0]), frame_number(batch[-1])
+        restore_state_before_frame(primary_detector, manifest, first,
+                                   initial_detector_state)
         emit_event(options, "batch_started", {
             "batch_index": batch_index,
             "batch_count": len(batches),
@@ -519,12 +529,12 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
 
         with timed("primary_roi_detection", timings):
             measured = []
+            detector_diagnostics = []
             for dng in batch:
                 with Image.open(tiffs / f"{dng.stem}.tif") as image:
-                    try:
-                        measured.append(detect(image, calibration.detector))
-                    except ValueError:
-                        measured.append(None)
+                    outcome = primary_detector.detect(image)
+                    measured.append(outcome.detection)
+                    detector_diagnostics.append(outcome.diagnostics.to_dict())
         registration_primary = measured
         if calibration.capture_geometry is not None:
             # The new geometry was validated with the established batch gate.
@@ -649,6 +659,7 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                             "p07_contradicted": p07.get("contradicted"),
                         })
                     record.update(physical_details[index])
+                    record["sprocket_detector_diagnostics"] = detector_diagnostics[index]
                     frame_records.append(record)
                     continue
                 position = included_position[index]
@@ -675,6 +686,7 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                     record.update({"optical_lower_top_y": registration.optical_lower_top_y,
                                    "registration_diagnostics": registration.diagnostics})
                 record.update(physical_details[index])
+                record["sprocket_detector_diagnostics"] = detector_diagnostics[index]
                 if result is not None:
                     record.update(result.diagnostics)
                     record["normal_residual_measurement"] = measurement_details(residual_measured[position].normal)
@@ -754,6 +766,7 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                    "accepted": len(trusted), "interpolated": 0,
                    "elapsed_seconds": round(time.time() - started, 2),
                    "completed": utc_now(), "frame_records": frame_records,
+                   "sprocket_detector_checkpoint": detector_checkpoint(primary_detector),
                    "stage_timings_seconds": dict(timings),
                    "registration_counts": dict(registration_counts)}
         record_segment(manifest_path, manifest, segment)
