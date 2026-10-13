@@ -19,6 +19,67 @@ load, and `--sprocket-detector-mode` still selects registration. The new
 processing API boundary. Both default to the existing behavior: detector
 `adaptive-v1`, registration `physical-p07-v1`.
 
+## Available detectors
+
+### `adaptive-v1`
+
+This remains the default detector. It wraps the existing
+`grokcam.sprocket_detection.detect` implementation without changing its
+calculation or coordinates.
+
+### `rolling-geometry-v1`
+
+This optional, stateful Regular 8 detector preserves the behavior of the
+500-frame rolling-geometry experiment. It uses the fixed X strip `[240, 660)`,
+a per-frame p99 luminance threshold multiplied by `0.96`, and an initial
+minimum row count of 130. It bootstraps from accepted geometry, begins its
+tighter rolling geometry gate after five accepted pairs, and keeps medians over
+up to 25 accepted pairs. The dynamic row minimum is `max(130, round(0.65 ×
+rolling median plateau row count))`. Its profile-transition fallback runs only
+when the fast candidate path has no accepted pair. Accepted pairs alone update
+the rolling model.
+
+The detector keeps the original experiment's `pair_bands()` and `band_edges()`
+calculations. Their source and the original trial script are preserved under
+`work/registration-walkthrough/Reel_46335_REDO1/`; see
+[`rolling-geometry-reference.md`](rolling-geometry-reference.md) for the
+reference inputs and reproduction procedure. The experimental thresholds and
+geometry gates are fixed; detector options are not accepted.
+
+Select the detector in calibration while leaving registration selection
+independent:
+
+```json
+{
+  "sprocket": {
+    "detector": "rolling-geometry-v1",
+    "registration": "physical-p07-v1"
+  }
+}
+```
+
+Or use the CLI:
+
+```sh
+grokcam-process-reel --sprocket-detector rolling-geometry-v1 \
+  --raw-dir /path/to/capture --output-dir /path/to/output
+```
+
+Diagnostics include fast or profile-fallback method, accepted/recovered/
+fallback-only/unresolved status, fallback attempt and recovery flags, geometry
+gate rejection reason, rolling pitch/height/width/aspect/center, dynamic row
+minimum, bootstrap progress, threshold measurements, candidate counts, and the
+selected pair geometry. Diagnostics are observational and do not feed back
+into detection.
+
+The detector is stateful. Its checkpoints include the rolling accepted-pair
+history and the first 12 bootstrap measurements. Verified segment checkpoints
+are restored before later pending batches. A detector version or effective
+configuration mismatch prevents resume; a missing checkpoint for a preceding
+verified segment also prevents a stateful resume. The unresolved trial frame
+4576 demonstrates a current limitation: a sprocket whose expected band
+extends beyond the image cannot be recovered by the profile fallback.
+
 ## Detector contract
 
 Detector implementations live under `grokcam.detectors`. A per-reel instance
@@ -32,32 +93,9 @@ implements `SprocketDetector` from `detectors.base`:
 - `name`, `version`, and `stateful` identify compatibility and checkpoint
   requirements.
 
-`adaptive-v1` wraps the existing `grokcam.sprocket_detection.detect` function;
-the algorithm and its returned coordinates are unchanged. It is currently the
-only production registration. To register a future stateful detector, its
-factory would be added to `detectors.registry`, for example:
-
-```python
-from grokcam.detectors.registry import register_detector
-from grokcam.detectors.rolling_geometry import RollingGeometryV1
-
-register_detector("rolling-geometry-v1", RollingGeometryV1)
-```
-
 The factory receives the common `DetectorCalibration` and the optional
-`sprocket.options` mapping. A future config could select it as follows:
-
-```json
-{
-  "sprocket": {
-    "detector": "rolling-geometry-v1",
-    "registration": "physical-p07-v1",
-    "options": {"bootstrap_pairs": 12, "history_size": 25}
-  }
-}
-```
-
-The rolling-geometry implementation is not present or enabled in this phase.
+`sprocket.options` mapping. `rolling-geometry-v1` rejects options so its
+experimentally evaluated parameters cannot be changed accidentally.
 
 ## Resume behavior
 

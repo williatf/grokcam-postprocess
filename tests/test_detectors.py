@@ -46,7 +46,9 @@ class MockStatefulDetector:
 
 class DetectorArchitectureTests(unittest.TestCase):
     def test_only_existing_production_detector_is_registered_by_default(self):
-        self.assertEqual(registered_detectors(), ("adaptive-v1",))
+        self.assertEqual(registered_detectors(),
+                         ("adaptive-v1", "rolling-geometry-v1"))
+        self.assertEqual(load_calibration().sprocket_detector_id, "adaptive-v1")
         with self.assertRaisesRegex(ValueError, "unknown sprocket detector"):
             create_detector("not-registered", load_calibration().detector)
 

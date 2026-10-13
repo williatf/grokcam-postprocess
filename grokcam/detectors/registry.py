@@ -10,9 +10,13 @@ from typing import Any, Callable
 from ..config import DetectorCalibration
 from .adaptive import _factory as adaptive_factory
 from .base import SprocketDetector
+from .rolling_geometry import _factory as rolling_geometry_factory
 
 DetectorFactory = Callable[[DetectorCalibration, dict[str, Any]], SprocketDetector]
-_FACTORIES: dict[str, DetectorFactory] = {"adaptive-v1": adaptive_factory}
+_FACTORIES: dict[str, DetectorFactory] = {
+    "adaptive-v1": adaptive_factory,
+    "rolling-geometry-v1": rolling_geometry_factory,
+}
 
 
 def register_detector(name: str, factory: DetectorFactory) -> None:
@@ -26,8 +30,8 @@ def register_detector(name: str, factory: DetectorFactory) -> None:
 
 def unregister_detector(name: str) -> None:
     """Remove a non-production registration (primarily useful to test plugins)."""
-    if name == "adaptive-v1":
-        raise ValueError("the built-in adaptive-v1 detector cannot be unregistered")
+    if name in {"adaptive-v1", "rolling-geometry-v1"}:
+        raise ValueError(f"the built-in {name} detector cannot be unregistered")
     _FACTORIES.pop(name, None)
 
 
