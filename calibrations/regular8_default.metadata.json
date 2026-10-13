@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "calibration_id": "grokcam-regular8-default-v1",
+  "display_name": "Regular 8 production default",
+  "film_formats": ["regular8"],
+  "config": "regular8_default.json",
+  "requires": ["darktable_match_v1.json"],
+  "adoption_status": "golden_production",
+  "movie_production": true
+}

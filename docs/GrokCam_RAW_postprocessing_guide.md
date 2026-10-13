@@ -1,8 +1,10 @@
 # GrokCam RAW post-processing production guide
 
 This is the operational and technical guide for the GrokCam production RAW
-processor established by commit `2b7abbe` and baseline tag
-`grokcam-production-v1`. It describes the current `grokcam/` package and is the
+processor. The Regular 8 production baseline was established by commit
+`2b7abbe` and tag `grokcam-production-v1`; the current repository also includes
+the Super 8 production path and scheduler introduced through the
+`super8-added` history. It describes the current `grokcam/` package and is the
 authoritative processing guide.
 
 The canonical command is:
@@ -17,7 +19,7 @@ deletes source DNGs.
 
 ## 1. Overview
 
-The production path is:
+The shared production path is:
 
 ```text
 archival DNG
@@ -29,13 +31,13 @@ learned Darktable-matched rawpy development
 temporary 16-bit RGB TIFF
     |
     v
-sprocket-pair detection
+      format-specific sprocket/perforation registration
     |
     v
 batch validation and interpolation
     |
     v
-optional residual sprocket measurement and recovery
+      format-specific fallback and recovery
     |
     v
 one corrected full-resolution subpixel crop
@@ -61,6 +63,11 @@ The design has two anchors:
   approved Darktable rendering. Production does not run Darktable per frame and
   does not learn while processing a reel.
 
+Regular 8 uses the frozen P15-first physical registration policy (with P07/P22
+fallback) described below. Super 8 uses the accepted P03/P06 image-only
+registration hierarchy and its versioned template bank; it does not require
+capture-time metadata at runtime.
+
 ## 2. Production architecture
 
 The important modules are grouped by responsibility rather than framework
@@ -71,7 +78,7 @@ layers:
 | Entry and composition | `grokcam.cli.process_reel`, `grokcam.pipeline` | Parse the supported CLI, load calibration, and invoke the production pipeline. |
 | Batch lifecycle | `grokcam.batch`, `grokcam.resume`, `grokcam.timing` | Select frames, lock an output, plan/resume batches, stage work, order the stages, report timing, clean work, and finalize. |
 | RAW development | `grokcam.raw_development` | Validate and apply the frozen rawpy-to-Darktable match and write 16-bit TIFFs. |
-| Film geometry | `grokcam.sprocket_detection`, `grokcam.physical_sprocket`, `grokcam.registration`, `grokcam.vertical_stabilization`, `grokcam.image_processing` | Detect and validate primary anchors, optionally recover rejected frames with frozen P07 physical evidence, refine vertical alignment, calculate crop coordinates, resample once for final output, orient, and apply contrast. |
+| Film geometry | `grokcam.sprocket_detection`, `grokcam.physical_sprocket`, `grokcam.registration`, `grokcam.vertical_stabilization`, `grokcam.super8_registration`, `grokcam.image_processing` | Detect and validate format-specific registration evidence, recover or interpolate only according to the selected policy, calculate native-coordinate crop geometry, resample once for final output, orient, and apply contrast. |
 | Presentation normalization | `grokcam.normalization` | Apply bounded, temporally smoothed exposure and channel corrections. |
 | Video and records | `grokcam.encoding`, `grokcam.manifest`, `grokcam.regression` | Encode and verify video, write atomic manifests, calculate hashes, and compare results with a reference. |
 | Configuration and data | `grokcam.config`, `grokcam.models` | Own calibrated constants and structured geometry/detection values. |
@@ -105,6 +112,33 @@ RunOptions + ProductionCalibration
               v
        FFmpeg encode -> verify -> manifest
 ```
+
+For Super 8, the registration portion is instead:
+
+```text
+threaded RAW development -> native-orientation TIFF
+              |
+              v
+       P03/P06 same-frame registration
+              |
+              v
+ PRIMARY / SECONDARY / FALLBACK / TEMPLATE_FALLBACK
+              |
+              v
+ one-frame boundary interpolation only when directly bracketed
+              |
+              v
+ fixed native-coordinate crop -> optional vertical flip -> normalization
+              |
+              v
+ verified segment -> joined movie + registration audit + manifest
+```
+
+The Super 8 producer develops and registers batches while a consumer renders,
+normalizes, encodes, verifies, and cleans the preceding batch. The queue is
+bounded to one batch. At a boundary, the producer may prefetch exactly one
+future frame when that is needed to resolve one trailing failed observation;
+the future frame is not treated as a second independent registration pass.
 
 ## 3. Canonical production command
 
@@ -152,6 +186,46 @@ the current Linux environment.
 The CLI default batch size is 960 frames. A 300-frame batch is a conservative
 operational choice that reduces peak disposable storage and restart cost.
 
+### Super 8 production
+
+Super 8 requires an explicitly validated Super 8 crop calibration. The
+calibration is expressed in native developed-DNG coordinates and is applied
+before output orientation. Detection and registration always receive the
+native image orientation. `vertical_flip: true` flips the registered crop
+top-to-bottom exactly once for final viewing; no horizontal flip is applied.
+
+The current REDO5 calibration is:
+
+```text
+calibration: calibrations/super8_redo5.json
+crop version: super8-redo5-crop-v1
+crop coordinate system: native_capture_orientation
+x offset: 60 px
+y offset: -500 px
+width: 1320 px
+height: 1000 px
+vertical_flip: true
+horizontal_flip: false
+```
+
+Run the full REDO5 render from the repository root with:
+
+```bash
+/home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
+  /mnt/SG1TB/GrokCam/projects/Farmington_YW_Reel_REDO5 \
+  /mnt/GrokCam/projects/RAW_Test/outputs/super8_redo5 \
+  --film-format super8 \
+  --calibration calibrations/super8_redo5.json \
+  --first 1 --last 5638 \
+  --batch-frames 960 --fps 12 --jobs 3
+```
+
+The mounted capture project is read-only source material. Super 8 production
+does not depend on its capture metadata at runtime; it develops the source DNGs
+with the same `DarktableMatchedDeveloper` used by the shared production path.
+Use `--registration-only` for a registration audit without crop/render/encode,
+and review the resulting audit before approving a new calibration.
+
 ### Supported arguments
 
 | Argument | Default | Meaning |
@@ -166,14 +240,17 @@ operational choice that reduces peak disposable storage and restart cost.
 | `--crop-preset loose` | `loose` | The only supported crop preset. |
 | `--ffmpeg PATH` | discovered in `PATH`, otherwise `/usr/local/bin/ffmpeg` | FFmpeg executable. |
 | `--ffprobe PATH` | discovered in `PATH`, otherwise `/usr/local/bin/ffprobe` | FFprobe executable. |
-| `--minimum-free-gib N` | `22.0` | Refuse to start or continue a batch below this free-space threshold on the output filesystem. |
+| `--minimum-free-gib N` | `22.0` | Refuse to start or continue a batch below this free-space threshold on the filesystem holding active processing intermediates. |
 | `--staging-dir PATH` | `/mnt/grokcam-scratch` | Existing writable local filesystem used for per-render TIFFs, registration images, normalized images, and encoded segments. A unique run directory is created beneath it. |
 | `--plan-only` | off | Show selected remaining ranges and batches without processing images. |
 | `--dry-run` | off | Exact alias for `--plan-only`. |
-| `--calibration FILE` | none | Advanced JSON overrides for production calibration. Not needed for normal v1 processing. |
+| `--calibration FILE` | none | Advanced JSON overrides for production calibration; the Super 8 REDO5 render uses `calibrations/super8_redo5.json`. |
 | `--match-report FILE` | repository v1 artifact | Explicitly override the learned match report. Avoid for normal v1 production. |
 | `--vertical-stabilization` | off | Enable second-stage physical vertical registration. Use a new output directory. |
 | `--sprocket-detector-mode MODE` | `physical-p07-v1` | Select the promoted P15-first policy or explicit `legacy` rollback behavior. Never mix modes in one output directory. |
+| `--capture-geometry FILE` | none | Optional strictly validated Regular 8 capture-specific geometry artifact. Supplying it for Super 8 is an error. |
+| `--film-format FORMAT` | `regular8` | Select `regular8` or `super8`; Super 8 also requires a validated Super 8 crop calibration. |
+| `--registration-only` | off | For Super 8, run development and registration audit without crop/render/encode. |
 | `-h`, `--help` | — | Print the authoritative CLI usage and exit. |
 
 The current configuration loader accepts detector, crop, match-report,
@@ -240,8 +317,8 @@ Never use the archival RAW directory as `OUTPUT_DIR`.
 
 ### Output during processing
 
-For a batch covering frames 1–300, the local staging filesystem may temporarily
-look like:
+For Regular 8, a batch covering frames 1–300, the local staging filesystem may
+temporarily look like:
 
 ```text
 grokcam-regular8-<unique-run>/
@@ -263,14 +340,35 @@ grokcam-regular8-<unique-run>/
 └── processing_manifest.json
 ```
 
-The persistent `OUTPUT_DIR` contains only the final/published artifacts after
-successful completion. The completed manifest records `staging_root`, the
-actual per-render `staging_directory`, and `output_directory`.
+Super 8 uses the same unique per-render directory, with a format-specific
+working subtree:
 
-The segment filename currently contains the literal suffix `_16fps` even when a
-non-default `--fps` is selected. The encoded rate follows `--fps`; the segment
-basename is a v1 naming quirk. The final movie name uses the actual requested
-rate.
+```text
+grokcam-super8-<unique-run>/
+├── .super8-staging/
+│   └── segment_000001_000960/
+│       ├── tiff/
+│       ├── registered/
+│       └── normalized/
+├── segments/
+│   └── frames_000001_000960_12fps.mp4
+├── diagnostics/
+├── registration_audit.json
+├── registration_audit.jsonl
+└── processing_manifest.json
+```
+
+The persistent `OUTPUT_DIR` contains the published movie, manifest, and any
+retained audit, diagnostic, or debug artifacts; disposable TIFFs, registered
+and normalized JPEGs, component videos, and temporary concat files remain on
+the local staging filesystem during processing and are removed after successful
+publication. The completed manifest records `staging_root`, the actual
+per-render `staging_directory`, and `output_directory`.
+
+Regular 8 segment filenames currently contain the literal suffix `_16fps` even
+when a non-default `--fps` is selected. The encoded rate follows `--fps`; the
+segment basename is a v1 naming quirk. Super 8 segment filenames use the actual
+requested rate. Both final movie names use the actual requested rate.
 
 ### Output after successful finalization
 
@@ -286,8 +384,22 @@ production-v1/
 
 After final verification, component segment videos and `segments.txt` are
 deleted, and `segments/` is removed if empty. Batch TIFFs and both JPEG sequences
-are also deleted after their segment is verified. The unique local staging run
-directory is removed only after persistent artifacts have been published.
+are also deleted after their segment is verified. Super 8 additionally removes
+its `.super8-staging` tree after all batches are verified. The unique local
+staging run directory is removed only after persistent artifacts have been
+published. A failed run leaves the local run directory in place and writes an
+`OUTPUT_DIR/.staging-failure.json` pointer where possible.
+
+For a successful Super 8 REDO5 render, the persistent output normally includes:
+
+```text
+super8_redo5/
+├── Super8_REDO5_000001_005638_12fps.mp4
+├── processing_manifest.json
+├── registration_audit.json
+├── registration_audit.jsonl
+└── diagnostics/                 # difficult/fallback frame overlays when produced
+```
 
 The lock file's existence does not mean a process is running: exclusivity is
 provided by an operating-system `flock`, which is released when the process
@@ -367,10 +479,14 @@ Before the first development batch, production reads the JSON and validates the 
 does not write the artifact. A new manifest records its resolved path, SHA-256,
 model, creation date, and training/holdout identifiers.
 
-Inference is deterministic for fixed DNG bytes, calibration bytes, code,
+The tested RAW-development and same-image registration operations are expected
+to be deterministic for fixed DNG bytes, calibration bytes, code,
 rawpy/LibRaw/NumPy/tifffile versions, and compatible floating-point behavior.
-Rawpy or LibRaw changes can alter demosaicing or metadata interpretation even
-when the JSON is unchanged, so exact upgrades require the v1 regression.
+This does not by itself guarantee byte-identical results across different
+scheduler implementations or complete runs; the producer/consumer path must be
+validated with its production audit and output comparison. Rawpy or LibRaw
+changes can alter demosaicing or metadata interpretation even when the JSON is
+unchanged, so exact upgrades require the appropriate regression.
 
 ## 7. Sprocket detection
 
@@ -427,6 +543,85 @@ developed TIFF is preserved under `debug/excluded_frames/`, and processing
 continues. No temporal registration interpolation occurs in this mode.
 
 Residual vertical stabilization cannot be enabled with `physical-p07-v1`.
+
+### Optional capture-specific Regular 8 geometry
+
+The validated Jan_and_Wendy_Hintze artifact is an optional input to the
+existing Regular 8 hierarchy. It changes only the pixel geometry used by P15
+and the P24 capture/physical corroboration gate; it does not change the
+detector, P15 quality thresholds, P07, P22, crop dimensions, normalization, or
+encoding. Without this option the historical calibration path remains active.
+
+The artifact is selected explicitly:
+
+```bash
+--capture-geometry calibrations/jan_and_wendy_hintze_regular8_geometry_v1.json
+```
+
+The exact schema-1 JSON contract is:
+
+```json
+{
+  "schema_version": 1,
+  "film_format": "regular8",
+  "calibration_method": "regular8_capture_geometry_v1",
+  "calibration_timestamp": "2026-09-22T00:00:00+00:00",
+  "frozen": true,
+  "source": "<capture project path>",
+  "calibration_frames": [1, 2, 3],
+  "sprocket_pitch_px": 732.0,
+  "sprocket_pitch_mad_px": 0.2,
+  "sprocket_width_px": 257.0,
+  "sprocket_width_mad_px": 0.2,
+  "sprocket_height_px": 242.0,
+  "sprocket_height_mad_px": 0.2,
+  "p15_image_support_width_px": 257.0,
+  "p15_image_support_height_px": 242.0,
+  "sprocket_x_px": 438.0,
+  "sprocket_x_mad_px": 0.2,
+  "lower_x_minus_midpoint_px": 2.75,
+  "lower_top_minus_midpoint_px": 245.0,
+  "lower_top_residual_mad_px": 0.3,
+  "p24_capture_pitch_px": 733.333,
+  "p24_capture_pitch_mad_px": 0.2,
+  "p24_capture_width_px": 353.566,
+  "p24_capture_width_mad_px": 0.3,
+  "p24_capture_height_px": 249.333,
+  "p24_capture_height_mad_px": 0.3,
+  "p24_capture_x_displacement_px": 9.339,
+  "p24_capture_x_displacement_mad_px": 0.3,
+  "quality": {
+    "capture_lower_top_minus_midpoint": {"median": 242.0},
+    "capture_lower_x_minus_midpoint": {"median": 4.67}
+  },
+  "sanity_bounds": {}
+}
+```
+
+The canonical artifact in the repository is authoritative. A production
+artifact is rejected when
+required fields are missing, non-finite, incompatible with Regular 8, or
+outside sanity bounds. The chosen artifact is recorded in the manifest under
+`capture_geometry`; resuming an output with a different artifact is rejected.
+
+New Regular 8 captures write the same frozen object into the project
+`metadata.json` after the automatic capture calibration reaches its stability
+criteria. The postprocess API and normal CLI consume that object automatically;
+an explicit `--capture-geometry` artifact remains an override for review or
+historical runs. The precedence is:
+
+1. explicit API/CLI geometry override (`explicit_override`);
+2. frozen `metadata.json` geometry (`project_metadata`);
+3. the selected Regular 8 default (`regular8_default`).
+
+Malformed metadata geometry is reported as a structured source-validation
+error rather than silently falling back. Projects created before this feature,
+and all Super 8 projects, retain the default behavior.
+
+The manifest records `capture_geometry_source` alongside the exact geometry
+object. A frozen object has `schema_version: 1`, `film_format: "regular8"`,
+`frozen: true`, calibration frame numbers, robust P15 image-support fields,
+P24 capture-ROI fields, `quality` medians/MAD summaries, and `sanity_bounds`.
 
 ## 8. Registration and cropping
 
@@ -533,8 +728,9 @@ groups and then into batches no larger than `--batch-frames`.
 
 The processor opens `OUTPUT_DIR/.pipeline.lock` and requests a nonblocking
 exclusive `flock`. A second process targeting the same output exits immediately.
-Free space on the output filesystem is checked once before planning and again
-before every batch.
+With local staging enabled, free space on the active local staging filesystem is
+checked once before planning and again before every batch. The source DNGs
+remain on their mounted source filesystem.
 
 ### Stage order
 
@@ -564,6 +760,53 @@ manifest, remove component segments, and remove `segments.txt`.
 
 Verified segments bound data loss and restart cost: an interruption affects at
 most the current batch instead of requiring one enormous uninterrupted render.
+
+### Super 8 producer/consumer scheduling
+
+Super 8 uses a producer/consumer scheduler inside each production run:
+
+1. The producer develops DNGs to 16-bit TIFFs using
+   `DarktableMatchedDeveloper` and performs P03/P06 registration.
+2. The producer places a completed batch in a bounded queue with capacity one.
+3. The consumer crops accepted registrations in native coordinates, applies the
+   configured vertical flip, normalizes the registered JPEGs, encodes and
+   verifies the segment, then removes that batch's disposable staging tree.
+4. The producer and consumer overlap when the next batch is ready, while the
+   queue prevents unbounded TIFF accumulation.
+
+At most one future boundary frame is prefetched when a trailing failed
+observation can be resolved by a directly adjacent trusted frame. A batch
+boundary is recorded as `closed` when this resolution succeeds; unresolved
+observations remain `UNTRUSTED` and are excluded rather than silently assigned
+a registration coordinate.
+
+Super 8 prints and records progress at these points:
+
+```text
+Remaining plan: N frames in M batches
+[i/M] developing and registering K frames (FIRST-LAST)
+  developed 25/K; free ... GiB
+  registered 25/K
+  Timing breakdown for FIRST-LAST:
+    raw_development_worker_seconds ...
+    registration_main_thread_seconds ...
+    develop_register_wall_seconds ...
+    crop_render_wall_seconds ...
+    normalization_wall_seconds ...
+    encoding_verification_wall_seconds ...
+  Registration counts: PRIMARY=..., SECONDARY=..., FALLBACK=...
+  Concurrency: producer ...; consumer ...; queue wait ...; boundary closed
+  verified and cleaned segment FIRST-LAST; free ... GiB
+super8 production LAST/TOTAL
+Complete and verified: ...
+Registration summary: ...
+Scheduler timing: ...
+```
+
+Development and registration timing values are accumulated worker/main-thread
+measurements and may overlap; they should not be summed as independent wall
+clock durations. The final `registration_audit.json` and
+`processing_manifest.json` retain the per-batch timing and scheduler metrics.
 
 ## 11. Resume and recovery
 
@@ -644,6 +887,7 @@ and final verification record—not a replacement for the source DNGs.
 | `fps`, `batch_frames` | Requested movie rate and batch setting. |
 | `raw_development_calibration` | Calibration path, SHA-256, model, creation date, and training/holdout frames. |
 | `crop_preset`, `crop` | `loose` and the four crop values. |
+| `capture_geometry` | `null` for the legacy/default path, otherwise the exact validated Regular 8 geometry artifact used for the run. |
 | `vertical_stabilization` | Enabled state, upper/lower reference positions, confidence threshold, and agreement tolerance. |
 | `normalization` | Picture aperture, bounds/blend metadata, and eventually `target_median_luma`. |
 | `tools` | Python, Pillow, rawpy, and FFmpeg versions recorded at creation. |
@@ -656,6 +900,15 @@ The canonical `pipeline` value is `grokcam_postprocess`. Manifests from the
 pre-consolidation production path may contain the historical value
 `grokcam_raw_production_darktable_matched`; that value is no longer emitted by
 new output directories.
+
+Super 8 manifests additionally record the format, validated crop calibration
+and its native-capture coordinate system, output orientation, P03/P06
+provenance counts, difficult-frame audit, diagnostic overlay paths, and the
+fact that capture metadata was not used at runtime. The Super 8
+`registration_audit.json` contains the same run's registration summary,
+per-batch timing reports, scheduler metrics, crop calibration, and orientation
+record. `registration_audit.jsonl` provides one registration record per source
+frame.
 
 ### Segment fields
 
@@ -672,6 +925,9 @@ stage_timings_seconds, registration_counts
 `verification` contains FFprobe stream/format data. `elapsed_seconds` is total
 batch wall time. Stage timings and P15/P07/P22 invocation counts are persisted;
 the final manifest also records totals and mean time per relevant invocation.
+Super 8 stores its detailed per-batch timing and scheduler fields in
+`registration_audit.json`; its segment records additionally identify the
+format-specific registration provenance.
 
 ### Frame records
 
@@ -702,6 +958,12 @@ false and the residual-only fields are absent, preserving the former frame path.
 
 The `normalization` object contains `median_luma`, `channel_median`,
 `exposure_gain`, and `channel_gains_rgb`.
+
+Super 8 frame records use `detector_provenance` values `PRIMARY`, `SECONDARY`,
+`FALLBACK`, `TEMPLATE_FALLBACK`, `INTERPOLATED`, or `UNTRUSTED`. They also
+record the native registration coordinate, crop coordinate system, whether the
+vertical flip was applied after cropping, and the encoded output frame when
+the frame was included.
 
 In `physical-p07-v1`, `accepted: false` and `output_disposition: excluded` mean
 the frame has no final anchor and no encoded output frame. The top-level
@@ -777,7 +1039,7 @@ Stopping safely: only N.N GiB free
 Inspect both relevant filesystems before a long run:
 
 ```bash
-df -h /home/todd/telecine/grokcam-postprocess /mnt/GrokCam
+df -h /mnt/grokcam-scratch /mnt/GrokCam
 ```
 
 Free space or choose a smaller `--batch-frames`; do not lower the safety threshold
@@ -799,6 +1061,18 @@ Errors such as `unsupported match model`, `expected 13 transform rows`,
 selected report is not a valid production-v1 artifact. Do not repair it in place;
 restore the version-controlled file.
 
+For Super 8, also verify the selected format calibration and its template-bank
+paths:
+
+```bash
+test -f calibrations/super8_redo5.json
+test -f calibrations/super8_template_bank_v1.npz
+```
+
+The Super 8 movie path refuses to run when `crop_validated` is false. Do not
+change the REDO5 crop offsets or template resources without a new reviewed
+calibration result.
+
 ### Sprocket detection failure
 
 In `physical-p07-v1`, an unresolved frame is excluded after every same-frame
@@ -817,6 +1091,14 @@ try a smaller test range in a new output directory. Do not adjust detector
 constants as part of recovering the production-v1 run; that would create a new
 algorithm/calibration variant requiring regression.
 
+For Super 8, inspect `registration_audit.json` and
+`registration_audit.jsonl`. Review `provenance_counts`, `difficult_frame_audit`,
+`p06_rejections`, `consecutive_exclusion_untrusted_runs`, and the saved native
+and final-viewing overlays under `diagnostics/`. `UNTRUSTED` records are not
+assigned a synthetic coordinate and are excluded unless the frozen hierarchy
+can directly bracket and mark them `INTERPOLATED`. A `TEMPLATE_FALLBACK` is a
+same-frame fallback, not a temporal interpolation.
+
 ### Excluded detections
 
 For `physical-p07-v1`, inspect `frame_mapping`, `exclusion_runs`, and records
@@ -824,7 +1106,7 @@ whose `output_disposition` is `excluded`. Review their preserved full-resolution
 TIFFs and detector provenance. Any consecutive run warrants explicit visual
 review; it is an intentional movie-time discontinuity, not interpolation.
 
-### Abnormal framing
+### Abnormal Regular 8 framing
 
 Compare `anchor_x`, `anchor_y`, `crop_left`, and `crop_top` with neighboring
 records. By definition:
@@ -870,11 +1152,12 @@ If no process is running, rerun the exact command. The OS lock is already free.
 
 ### Final verification failure
 
-The final movie is first created as `RAW_review_...tmp.mp4`; it is not installed
-at the final path until FFprobe frame-count verification and a complete FFmpeg
-decode succeed. Preserve the manifest, segments, temporary movie, and log for
-diagnosis. Correct the external/tool/storage problem and rerun; verified segment
-files can be reused while they still exist.
+The final Regular 8 movie is first created as `RAW_review_...tmp.mp4`; Super 8
+uses its `Super8_REDO5_...tmp.mp4` equivalent. Neither is installed at the
+final path until FFprobe frame-count verification and a complete FFmpeg decode
+succeed. Preserve the manifest, audit, diagnostics, segments, temporary movie,
+and console log for diagnosis. Correct the external/tool/storage problem and
+rerun; verified Regular 8 segment files can be reused while they still exist.
 
 ## 14. Planning a reel before processing
 
@@ -899,7 +1182,7 @@ The output reports:
 - each planned inclusive range and its frame count.
 
 Planning also validates that DNG selection is nonempty and contiguous and that
-the output filesystem meets the free-space threshold.
+the active staging filesystem meets the free-space threshold.
 
 `--plan-only` performs no image development or encoding, but it validates the
 configured staging filesystem and creates a unique local run directory. It also

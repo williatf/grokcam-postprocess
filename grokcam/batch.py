@@ -21,6 +21,7 @@ from PIL import Image
 from .config import DEFAULT_STAGING_DIR, ProductionCalibration
 from .encoding import (concatenate_segments, encode_segment, file_sha256,
                        verify_video)
+from .events import EventEmitter
 from .image_processing import registered_frame
 from .manifest import atomic_json, load_or_create, record_segment, utc_now
 from .models import SprocketDetection
@@ -50,6 +51,15 @@ class RunOptions:
     plan_only: bool = False
     registration_only: bool = False
     staging_dir: Path | None = None
+    output_name: str | None = None
+    event_emitter: EventEmitter | None = None
+    capture_geometry_source: str = "regular8_default"
+
+
+def emit_event(options: RunOptions, event: str, payload: dict) -> None:
+    """Send a typed event when the public API requested progress events."""
+    if options.event_emitter is not None:
+        options.event_emitter.emit(event, payload)
 
 
 def frame_number(path: Path) -> int:
@@ -102,7 +112,10 @@ def finalize_if_complete(options: RunOptions, dngs: list[Path], manifest: dict,
     if not segment_paths:
         raise RuntimeError("All selected source frames were excluded; no movie can be encoded")
     concat = options.output_dir / "segments.txt"
-    final = options.output_dir / f"RAW_review_{numbers[0]:06d}_{numbers[-1]:06d}_{options.fps}fps.mp4"
+    final = options.output_dir / (
+        options.output_name or
+        f"RAW_review_{numbers[0]:06d}_{numbers[-1]:06d}_{options.fps}fps.mp4"
+    )
     temporary = final.with_suffix(".tmp.mp4")
     finalization_started = time.perf_counter()
     concatenate_segments(options.ffmpeg, concat, segment_paths, temporary)
@@ -149,6 +162,11 @@ def finalize_if_complete(options: RunOptions, dngs: list[Path], manifest: dict,
         "p07_failures": count_totals["p07_failures"],
         "primary_p15_attempts": count_totals["primary_p15_attempts"],
         "primary_p15_successes": count_totals["primary_p15_successes"],
+        "p15_direct_count": count_totals["p15_direct"],
+        "p24_recovery_count": count_totals["p24_recovery"],
+        "p07_p22_count": count_totals["p07_p22"],
+        "interpolation_count": count_totals["interpolation"],
+        "unresolved_count": count_totals["unresolved"],
         "p24_branch_entries": count_totals["p24_attempts"],
         "p24_capture_pairs_available": count_totals["p24_capture_pairs_available"],
         "p24_capture_geometry_passes": count_totals["p24_capture_geometry_passes"],
@@ -332,7 +350,7 @@ def _print_super8_completion(summary: dict) -> None:
               flush=True)
 
 
-def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
+def run_reel(options: RunOptions, calibration: ProductionCalibration) -> dict | None:
     """Run production, optionally isolating all transient output locally."""
     process_started = time.perf_counter()
     staging_parent = _validated_staging_root(options)
@@ -368,6 +386,11 @@ def run_reel(options: RunOptions, calibration: ProductionCalibration) -> None:
                 manifest.write_text(json.dumps(manifest_data, indent=2) + "\n",
                                     encoding="utf-8")
             _print_super8_completion(published_result)
+        emit_event(options, "stage_progress", {
+            "stage": "publication", "completed": 1, "total": 1, "unit": "job",
+            "output_directory": str(output_dir),
+            "manifest_path": str(output_dir / "processing_manifest.json"),
+        })
         return published_result
     except BaseException as error:
         if "work_dir" in locals():
@@ -430,7 +453,9 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
 
     manifest_path = output_dir / "processing_manifest.json"
     manifest = load_or_create(manifest_path, raw_dir, numbers, options.fps,
-                              options.batch_frames, calibration, options.ffmpeg)
+                              options.batch_frames, calibration, options.ffmpeg,
+                              options.output_name,
+                              options.capture_geometry_source)
     completed_segments, batches = remaining_batches(dngs, manifest, options.batch_frames)
     remaining_count = sum(len(batch) for batch in batches)
     if completed_segments:
@@ -440,6 +465,7 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
     for batch in batches:
         print(f"  {frame_number(batch[0]):06d}-{frame_number(batch[-1]):06d} ({len(batch)} frames)", flush=True)
     if options.plan_only:
+        lock_handle.close()
         return
 
     developer = DarktableMatchedDeveloper(calibration.match.report.expanduser().resolve())
@@ -451,6 +477,14 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
         timings: dict[str, float] = defaultdict(float)
         registration_counts: dict[str, int] = defaultdict(int)
         first, last = frame_number(batch[0]), frame_number(batch[-1])
+        emit_event(options, "batch_started", {
+            "batch_index": batch_index,
+            "batch_count": len(batches),
+            "first_frame": first,
+            "last_frame": last,
+            "source_frames": len(batch),
+            "stage": "raw_development",
+        })
         free_gib = shutil.disk_usage(output_dir).free / 2**30
         if free_gib < options.minimum_free_gib:
             raise RuntimeError(f"Stopping safely: only {free_gib:.1f} GiB free")
@@ -475,6 +509,13 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                     future.result()
                     if done == 1 or done % 25 == 0 or done == len(batch):
                         print(f"  developed {done}/{len(batch)}; free {shutil.disk_usage(output_dir).free/2**30:.1f} GiB", flush=True)
+                        emit_event(options, "stage_progress", {
+                            "batch_index": batch_index,
+                            "stage": "raw_development",
+                            "completed": done,
+                            "total": len(batch),
+                            "unit": "frames",
+                        })
 
         with timed("primary_roi_detection", timings):
             measured = []
@@ -507,6 +548,23 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                     )
                 precise_results.append(result)
                 physical_details[index] = result.diagnostics
+                provenance = {
+                    "primary_p15": "p15_direct",
+                    "p24_capture_p15": "p24_recovery",
+                    "p07_p22": "p07_p22",
+                }.get(result.source, "unresolved")
+                registration_counts[provenance] += 1
+                emit_event(options, "registration_progress", {
+                    "batch_index": batch_index,
+                    "frame": frame_number(dng),
+                    "completed": index + 1,
+                    "total": len(batch),
+                    "unit": "frames",
+                    "provenance": provenance,
+                    "counts": {key: registration_counts[key] for key in
+                               ("p15_direct", "p24_recovery", "p07_p22",
+                                "interpolation", "unresolved")},
+                })
             detections = [None if result.crop is None else SprocketDetection(
                 float(result.anchor_x), float(result.optical_lower_top_y), None,
                 detector=result.source, detected=True, accepted=True, interpolated=False,
@@ -514,6 +572,13 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
         else:
             with timed("legacy_batch_validation", timings):
                 detections = validate_batch(measured, calibration.detector)
+        emit_event(options, "stage_progress", {
+            "batch_index": batch_index,
+            "stage": "registration",
+            "completed": len(batch),
+            "total": len(batch),
+            "unit": "frames",
+        })
         trusted = [item for item in detections if item is not None]
         reference_x = float(np.median([item.cx for item in trusted])) if trusted else None
 
@@ -620,6 +685,13 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                         ))
                 frame_records.append(record)
                 included_records.append(record)
+        emit_event(options, "stage_progress", {
+            "batch_index": batch_index,
+            "stage": "crop_render",
+            "completed": len(batch),
+            "total": len(batch),
+            "unit": "frames",
+        })
         shutil.rmtree(tiffs)
 
         video = None
@@ -633,21 +705,43 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                     manifest["normalization"]["target_median_luma"] = target
                 for record, correction in zip(included_records, corrections):
                     record["normalization"] = correction
+            emit_event(options, "stage_progress", {
+                "batch_index": batch_index,
+                "stage": "normalization",
+                "completed": len(included),
+                "total": len(included),
+                "unit": "frames",
+            })
 
             with timed("encoding_output", timings):
                 video = segments_dir / f"frames_{first:06d}_{last:06d}_16fps.mp4"
                 temporary_video = video.with_suffix(".tmp.mp4")
                 encode_segment(options.ffmpeg, normalized, temporary_video,
                                encoded_before + 1, len(included), options.fps)
+            emit_event(options, "stage_progress", {
+                "batch_index": batch_index,
+                "stage": "encoding",
+                "completed": len(included),
+                "total": len(included),
+                "unit": "frames",
+            })
             verification = verify_video(options.ffmpeg, options.ffprobe,
                                         temporary_video, len(included))
             os.replace(temporary_video, video)
+            emit_event(options, "stage_progress", {
+                "batch_index": batch_index,
+                "stage": "verification",
+                "completed": len(included),
+                "total": len(included),
+                "unit": "frames",
+            })
         for key in ("frames","primary_p15_attempts","primary_p15_successes","p24_attempts",
                     "p24_capture_pairs_available","p24_capture_geometry_passes",
                     "p24_physical_corroborator_available","p24_corroborated_gate_passes",
                     "p24_guided_p15_attempts","p24_guided_p15_successes",
                     "p24_guided_p15_failures","p07_attempts","p07_successes",
-                    "p07_failures","p22_invocations","excluded_frames"):
+                    "p07_failures","p22_invocations","excluded_frames",
+                    "p15_direct", "p24_recovery", "p07_p22", "interpolation", "unresolved"):
             registration_counts[key] += 0
         segment = {"first": first, "last": last, "frames": len(included),
                    "source_frames": len(batch), "excluded": len(batch) - len(included),
@@ -663,6 +757,25 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                    "stage_timings_seconds": dict(timings),
                    "registration_counts": dict(registration_counts)}
         record_segment(manifest_path, manifest, segment)
+        counts = {key: int(value) for key, value in registration_counts.items()}
+        counts["included"] = len(included)
+        counts["excluded"] = len(batch) - len(included)
+        emit_event(options, "registration_summary", {
+            "batch_index": batch_index,
+            "first_frame": first,
+            "last_frame": last,
+            "counts": counts,
+            "included_frames": len(included),
+            "excluded_frames": len(batch) - len(included),
+        })
+        emit_event(options, "batch_verified", {
+            "batch_index": batch_index,
+            "first_frame": first,
+            "last_frame": last,
+            "verified": True,
+            "elapsed_seconds": segment["elapsed_seconds"],
+            "stage_timings_seconds": segment["stage_timings_seconds"],
+        })
 
         total = sum(timings.values())
         print(f"  Timing breakdown for {first:06d}-{last:06d}:")
@@ -689,6 +802,9 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
         shutil.rmtree(work)
         print(f"  verified and cleaned segment {first:06d}-{last:06d}; free {shutil.disk_usage(output_dir).free/2**30:.1f} GiB", flush=True)
 
+    emit_event(options, "stage_progress", {
+        "stage": "finalization", "completed": 0, "total": 1, "unit": "job",
+    })
     final = finalize_if_complete(options, dngs, manifest, manifest_path, segments_dir)
     if final is not None:
         print(f"Complete and verified: {final}", flush=True)
@@ -699,3 +815,5 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
              "p07_fallback_successes", "p07_failures", "excluded_frames", "encoded_frames")),
             flush=True)
         print(f"Consecutive exclusion runs: {summary.get('consecutive_exclusion_runs', [])}", flush=True)
+    lock_handle.close()
+    return {"final": manifest.get("final"), "processing_summary": manifest.get("processing_summary", {})}

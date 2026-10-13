@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "calibration_id": "grokcam-super8-redo5-v1",
+  "display_name": "Super 8 REDO5 production",
+  "film_formats": ["super8"],
+  "config": "super8_redo5.json",
+  "artifact": "super8_redo5.json",
+  "artifact_sha256": "dee69c341cd323c772e2128a84f9a0e97a91854eb2449fcb8146823cf791870a",
+  "requires": [
+    "darktable_match_v1.json",
+    "super8_template_bank_v1.json",
+    "super8_template_bank_v1.npz"
+  ],
+  "adoption_status": "golden_production",
+  "movie_production": true,
+  "crop_calibration": {
+    "validated": true,
+    "version": "super8-redo5-crop-v1"
+  }
+}

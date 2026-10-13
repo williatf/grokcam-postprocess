@@ -18,6 +18,7 @@ import numpy as np
 from PIL import Image
 
 from .config import ProductionCalibration
+from .batch import emit_event
 from .encoding import concatenate_segments, encode_segment, file_sha256, verify_video
 from .image_processing import registered_frame
 from .models import CropGeometry
@@ -209,6 +210,7 @@ def _write_processing_manifest(output_dir: Path, dngs: list[Path],
     if options is not None:
         manifest["fps"] = options.fps
         manifest["batch_frames"] = options.batch_frames
+        manifest["output_name"] = options.output_name
     (output_dir / "processing_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -531,6 +533,13 @@ def _render_staged_batch(state: dict, output_dir: Path,
                            "output_disposition": "included"})
     state["timings"]["crop_render_wall_seconds"] = time.perf_counter() - crop_started
     _mark_scheduler(state, "crop_render_finished", timing_origin)
+    emit_event(options, "stage_progress", {
+        "batch_index": state["scheduler"]["batch_index"],
+        "stage": "crop_render",
+        "completed": len(state["records"]),
+        "total": len(state["records"]),
+        "unit": "frames",
+    })
     if not registered_paths:
         return ({"first": state["first"], "last": state["last"], "frames": 0,
                  "source_frames": len(state["records"]), "excluded": len(state["records"])},
@@ -541,6 +550,13 @@ def _render_staged_batch(state: dict, output_dir: Path,
     _mark_scheduler(state, "normalization_finished", timing_origin)
     included = [record for record in state["records"]
                 if record.get("output_disposition") == "included"]
+    emit_event(options, "stage_progress", {
+        "batch_index": state["scheduler"]["batch_index"],
+        "stage": "normalization",
+        "completed": len(included),
+        "total": len(included),
+        "unit": "frames",
+    })
     for record, correction in zip(included, corrections):
         record["normalization"] = correction
     video = output_dir / "segments" / f"frames_{state['first']:06d}_{state['last']:06d}_{options.fps}fps.mp4"
@@ -552,6 +568,13 @@ def _render_staged_batch(state: dict, output_dir: Path,
     temporary.replace(video)
     state["timings"]["encoding_verification_wall_seconds"] = time.perf_counter() - encoding_started
     _mark_scheduler(state, "encoding_verification_finished", timing_origin)
+    emit_event(options, "stage_progress", {
+        "batch_index": state["scheduler"]["batch_index"],
+        "stage": "verification",
+        "completed": len(registered_paths),
+        "total": len(registered_paths),
+        "unit": "frames",
+    })
     return ({"first": state["first"], "last": state["last"], "frames": len(registered_paths),
              "source_frames": len(state["records"]),
              "excluded": len(state["records"]) - len(registered_paths),
@@ -649,6 +672,14 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
         state["_phase_started"] = time.perf_counter()
         print(f"[{batch_index}/{len(batches)}] developing and registering "
               f"{len(paths)} frames ({first:06d}-{last:06d})", flush=True)
+        emit_event(options, "batch_started", {
+            "batch_index": batch_index,
+            "batch_count": len(batches),
+            "first_frame": first,
+            "last_frame": last,
+            "source_frames": len(paths),
+            "stage": "raw_development",
+        })
         return state
 
     def register_one(dng: Path, tiff: Path) -> tuple[dict, float]:
@@ -685,6 +716,13 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
             print(f"  developed 1/{len(state['paths'])}; free "
                   f"{_free_gib(output_dir):.1f} GiB", flush=True)
             print(f"  registered 1/{len(state['paths'])}", flush=True)
+            emit_event(options, "stage_progress", {
+                "batch_index": state["scheduler"]["batch_index"],
+                "stage": "registration",
+                "completed": 1,
+                "total": len(state["paths"]),
+                "unit": "frames",
+            })
 
     def finish_state(state: dict) -> dict:
         paths = state["paths"]
@@ -716,6 +754,13 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
             if _progress_checkpoint(done, len(paths)):
                 print(f"  developed {done}/{len(paths)}; free "
                       f"{_free_gib(output_dir):.1f} GiB", flush=True)
+                emit_event(options, "stage_progress", {
+                    "batch_index": state["scheduler"]["batch_index"],
+                    "stage": "raw_development",
+                    "completed": done,
+                    "total": len(paths),
+                    "unit": "frames",
+                })
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, options.jobs)) as pool:
             developed = {}
@@ -739,6 +784,13 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
                     done = state["_registered_count"]
                 if _progress_checkpoint(done, len(paths)):
                     print(f"  registered {done}/{len(paths)}", flush=True)
+                    emit_event(options, "stage_progress", {
+                        "batch_index": state["scheduler"]["batch_index"],
+                        "stage": "registration",
+                        "completed": done,
+                        "total": len(paths),
+                        "unit": "frames",
+                    })
         state["records"] = [records_by_path[path] for path in paths]
         state["timings"]["develop_register_wall_seconds"] = (
             time.perf_counter() - state["_phase_started"])
@@ -797,6 +849,13 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
                     future_state = start_state(batches[index + 1], index + 2)
                     prefetch_one(future_state)
                 resolve_boundary(state, left, future_state)
+                emit_event(options, "stage_progress", {
+                    "batch_index": state["scheduler"]["batch_index"],
+                    "stage": "boundary_resolution",
+                    "completed": len(state["records"]),
+                    "total": len(state["records"]),
+                    "unit": "frames",
+                })
                 if not enqueue(state):
                     return
                 last_produced_records[:] = state["records"]
@@ -855,6 +914,23 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
                 consumer_intervals.append((state["scheduler"]["consumer_start"],
                                             state["scheduler"]["consumer_finished"]))
                 batch_timings.append(_batch_report(state, segment))
+                report = batch_timings[-1]
+                emit_event(options, "registration_summary", {
+                    "batch_index": state["scheduler"]["batch_index"],
+                    "first_frame": state["first"],
+                    "last_frame": state["last"],
+                    "counts": report["registration_counts"],
+                    "included_frames": report["rendered_frames"],
+                    "excluded_frames": report["excluded_frames"],
+                })
+                emit_event(options, "batch_verified", {
+                    "batch_index": state["scheduler"]["batch_index"],
+                    "first_frame": state["first"],
+                    "last_frame": state["last"],
+                    "verified": True,
+                    "elapsed_seconds": sum(report["timing_seconds"].values()),
+                    "timing_seconds": report["timing_seconds"],
+                })
                 print(f"  verified and cleaned segment {state['first']:06d}-{state['last']:06d}; "
                       f"free {_free_gib(output_dir):.1f} GiB", flush=True)
             finally:
@@ -869,7 +945,8 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
 
     finalization_started = time.perf_counter()
     concat = output_dir / "segments.txt"
-    final = output_dir / f"Super8_REDO5_{dngs[0].stem.rsplit('_', 1)[-1]}_{dngs[-1].stem.rsplit('_', 1)[-1]}_{options.fps}fps.mp4"
+    final = output_dir / (options.output_name or
+                          f"Super8_REDO5_{dngs[0].stem.rsplit('_', 1)[-1]}_{dngs[-1].stem.rsplit('_', 1)[-1]}_{options.fps}fps.mp4")
     temporary = final.with_suffix(".tmp.mp4")
     concatenate_segments(options.ffmpeg, concat, [Path(item["video"]) for item in segments], temporary)
     final_verification = verify_video(options.ffmpeg, options.ffprobe, temporary, encoded_before)
@@ -908,6 +985,9 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
         "core_process_wall_seconds": time.perf_counter() - pipeline_started,
     }
     summary["scheduler"] = scheduler
+    emit_event(options, "stage_progress", {
+        "stage": "finalization", "completed": 1, "total": 1, "unit": "job",
+    })
     (output_dir / "registration_audit.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _write_processing_manifest(output_dir, dngs, calibration, summary, options, records)

@@ -12,6 +12,7 @@ dependencies = ["numpy", "Pillow", "rawpy", "tifffile", "opencv-python-headless>
 [project.scripts]
 grokcam-process-reel = "grokcam.cli.process_reel:main"
 grokcam-compare-reference = "grokcam.cli.compare_reference:main"
+grokcam-gui-api = "grokcam.cli.gui:main"
 
 [tool.setuptools.packages.find]
 include = ["grokcam*"]

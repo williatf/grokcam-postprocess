@@ -10,5 +10,5 @@ class ProductionPipeline:
     def __init__(self, calibration: ProductionCalibration):
         self.calibration = calibration
 
-    def process_reel(self, options: RunOptions) -> None:
-        run_reel(options, self.calibration)
+    def process_reel(self, options: RunOptions) -> dict | None:
+        return run_reel(options, self.calibration)
