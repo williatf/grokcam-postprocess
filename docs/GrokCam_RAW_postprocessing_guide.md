@@ -236,6 +236,7 @@ and review the resulting audit before approving a new calibration.
 | `--last N` | all | Select frames numbered `N` or lower. Inclusive. |
 | `--batch-frames N` | `960` | Maximum frames in each independently encoded batch. Must be positive. |
 | `--fps N` | `16` | Input sequence and output movie frame rate. |
+| `--video-format FORMAT` | `h264_mp4` | Select compatible H.264/MP4 or 16-bit FFV1 v3/Matroska output. The FFV1 path retains 16-bit RGB through crop and normalization; custom output names must end in `.mkv`. |
 | `--jobs N` | `3` | Maximum concurrent rawpy development workers. At least one worker is used. |
 | `--crop-preset loose` | `loose` | The only supported crop preset. |
 | `--ffmpeg PATH` | discovered in `PATH`, otherwise `/usr/local/bin/ffmpeg` | FFmpeg executable. |
@@ -739,16 +740,18 @@ Within each batch:
 1. Recreate `.staging/segment_FIRST_LAST/` from scratch.
 2. Develop DNGs concurrently into 16-bit TIFFs.
 3. Detect sprockets serially; validate them and apply the configured failure policy.
-4. Crop, orient, and write registered JPEGs.
-5. Delete TIFFs.
-6. Normalize registered JPEGs.
-7. Encode a temporary H.264 segment.
+4. Crop and orient the accepted frames. H.264 mode writes JPEGs; FFV1 mode writes 16-bit TIFFs.
+5. Delete the developed TIFF cache.
+6. Normalize the registered frames, retaining JPEG or 16-bit TIFF according to the selected format.
+7. Encode a temporary H.264 segment or 16-bit FFV1 v3 Matroska segment.
 8. Verify its frame count with FFprobe and fully decode it with FFmpeg.
 9. Atomically replace the final segment path and write its manifest record.
 10. Delete that batch's entire staging directory.
 
-Encoding uses libx264, preset `fast`, CRF 15, one encoding thread, `yuv420p`, and
-even-dimension padding. The sequence frame rate and movie rate both use `--fps`.
+H.264 encoding uses libx264, preset `fast`, CRF 15, one encoding thread,
+`yuv420p`, and even-dimension padding. FFV1 uses version 3, RGB48 little-endian
+pixels, and lossless coding. The sequence frame rate and movie rate both use
+`--fps`.
 
 ### Finalization
 

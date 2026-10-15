@@ -18,15 +18,17 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+import tifffile
 
 from .config import DEFAULT_STAGING_DIR, ProductionCalibration
 from .encoding import (concatenate_segments, encode_segment, file_sha256,
                        verify_video)
 from .events import EventEmitter
-from .image_processing import registered_frame
+from .image_processing import (registered_frame, registered_frame_16bit,
+                               rgb16_to_pillow)
 from .manifest import atomic_json, load_or_create, record_segment, utc_now
 from .models import SprocketDetection
-from .normalization import normalize_frames
+from .normalization import normalize_frames, normalize_frames_16bit
 from .precision_registration import register_precisely
 from .raw_development import DarktableMatchedDeveloper
 from .registration import crop_for_detection
@@ -55,6 +57,7 @@ class RunOptions:
     registration_only: bool = False
     staging_dir: Path | None = None
     output_name: str | None = None
+    video_format: str = "h264_mp4"
     event_emitter: EventEmitter | None = None
     capture_geometry_source: str = "regular8_default"
     registration_log: Path | None = None
@@ -79,6 +82,14 @@ def write_registration_log(options: RunOptions, event: str, payload: dict) -> No
 
 def frame_number(path: Path) -> int:
     return int(path.stem.rsplit("_", 1)[-1])
+
+
+def video_extension(video_format: str) -> str:
+    if video_format == "h264_mp4":
+        return ".mp4"
+    if video_format == "ffv1_mkv_16bit":
+        return ".mkv"
+    raise ValueError(f"unsupported video format: {video_format}")
 
 
 def preserve_excluded_tiff(source: Path, output_dir: Path) -> Path:
@@ -127,17 +138,20 @@ def finalize_if_complete(options: RunOptions, dngs: list[Path], manifest: dict,
     if not segment_paths:
         raise RuntimeError("All selected source frames were excluded; no movie can be encoded")
     concat = options.output_dir / "segments.txt"
+    extension = video_extension(options.video_format)
     final = options.output_dir / (
         options.output_name or
-        f"RAW_review_{numbers[0]:06d}_{numbers[-1]:06d}_{options.fps}fps.mp4"
+        f"RAW_review_{numbers[0]:06d}_{numbers[-1]:06d}_{options.fps}fps{extension}"
     )
-    temporary = final.with_suffix(".tmp.mp4")
+    temporary = final.with_name(final.stem + ".tmp" + extension)
     finalization_started = time.perf_counter()
     concatenate_segments(options.ffmpeg, concat, segment_paths, temporary)
     encoded_frames = sum(int(item.get("frames", 0)) for item in ordered)
     verification = verify_video(options.ffmpeg, options.ffprobe, temporary, encoded_frames)
     os.replace(temporary, final)
     manifest["final"] = {"video": str(final), "video_bytes": final.stat().st_size,
+                         "video_format": options.video_format,
+                         "bit_depth": 16 if options.video_format == "ffv1_mkv_16bit" else 8,
                          "video_sha256": file_sha256(final), "verified": True,
                          "verification": verification, "completed": utc_now()}
     records = sorted([record for item in ordered for record in item.get("frame_records", [])],
@@ -237,10 +251,14 @@ def finalize_if_complete(options: RunOptions, dngs: list[Path], manifest: dict,
         pass
     for item in manifest["segments"]:
         item["retained"] = False
+    removed_intermediates = ["16-bit developed TIFF cache", "registered JPEGs",
+                             "normalized JPEGs", "verified component videos"]
+    if options.video_format == "ffv1_mkv_16bit":
+        removed_intermediates = ["16-bit developed TIFF cache", "registered 16-bit TIFFs",
+                                 "normalized 16-bit TIFFs", "verified component videos"]
     manifest["retention"] = {
         "retained": ["source DNG archive (in place)", "verified joined movie", "processing manifest"],
-        "removed": ["16-bit TIFF cache", "Darktable databases", "registered JPEGs",
-                    "normalized JPEGs", "verified component videos"],
+        "removed": ["Darktable databases", *removed_intermediates],
     }
     atomic_json(manifest_path, manifest)
     return final
@@ -424,6 +442,9 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
         raw_dir = raw_dir / "raw"
     output_dir = options.output_dir.expanduser().resolve()
     options = RunOptions(**{**options.__dict__, "raw_dir": raw_dir, "output_dir": output_dir})
+    extension = video_extension(options.video_format)
+    if options.output_name is not None and Path(options.output_name).suffix.lower() != extension:
+        raise ValueError(f"output_name must use the {extension} extension for {options.video_format}")
     if calibration.film_format == "super8":
         output_dir.mkdir(parents=True, exist_ok=True)
         if options.registration_only:
@@ -475,7 +496,8 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                               options.batch_frames, calibration, options.ffmpeg,
                               options.output_name,
                               options.capture_geometry_source,
-                              sprocket_detector=primary_detector)
+                              sprocket_detector=primary_detector,
+                              video_format=options.video_format)
     completed_segments, batches = remaining_batches(dngs, manifest, options.batch_frames)
     remaining_count = sum(len(batch) for batch in batches)
     if completed_segments:
@@ -657,9 +679,14 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                 residual_measured = []
                 developed_heights = []
                 for (_, dng, detection), crop in zip(included, primary_crops):
-                    with Image.open(tiffs / f"{dng.stem}.tif") as image:
+                    tiff_path = tiffs / f"{dng.stem}.tif"
+                    with Image.open(tiff_path) as image:
                         developed_heights.append(image.height)
-                        provisional = registered_frame(image, crop, calibration.contrast)
+                        if options.video_format == "ffv1_mkv_16bit":
+                            provisional = rgb16_to_pillow(registered_frame_16bit(
+                                tifffile.imread(tiff_path), crop, calibration.contrast))
+                        else:
+                            provisional = registered_frame(image, crop, calibration.contrast)
                     # Match the validated detector input without retaining a
                     # second crop or reading/developing the DNG again.
                     serialized = io.BytesIO()
@@ -719,11 +746,18 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                 primary_crop = primary_crops[position]
                 result = None if stabilization is None else stabilization[position]
                 crop = primary_crop if result is None else result.corrected_crop
-                with Image.open(tiffs / f"{dng.stem}.tif") as image:
-                    movie = registered_frame(image, crop, calibration.contrast)
                 encoded_number = encoded_before + position + 1
-                destination = registered / f"frame_{encoded_number:06d}.jpg"
-                movie.save(destination, quality=95, subsampling=0)
+                if options.video_format == "ffv1_mkv_16bit":
+                    movie = registered_frame_16bit(
+                        tifffile.imread(tiffs / f"{dng.stem}.tif"), crop,
+                        calibration.contrast)
+                    destination = registered / f"frame_{encoded_number:06d}.tif"
+                    tifffile.imwrite(destination, movie, photometric="rgb")
+                else:
+                    with Image.open(tiffs / f"{dng.stem}.tif") as image:
+                        movie = registered_frame(image, crop, calibration.contrast)
+                    destination = registered / f"frame_{encoded_number:06d}.jpg"
+                    movie.save(destination, quality=95, subsampling=0)
                 record = {
                     "frame": frame_number(dng), "source_name": dng.name,
                     "source_bytes": dng.stat().st_size, "anchor_x": detection.cx,
@@ -762,9 +796,12 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
         video = None
         verification = {"excluded_only_segment": True}
         if included:
-            registered_paths = sorted(registered.glob("frame_*.jpg"), key=frame_number)
+            frame_extension = ".tif" if options.video_format == "ffv1_mkv_16bit" else ".jpg"
+            registered_paths = sorted(registered.glob(f"frame_*{frame_extension}"), key=frame_number)
             with timed("normalization", timings):
-                corrections, target = normalize_frames(
+                normalizer = (normalize_frames_16bit if options.video_format == "ffv1_mkv_16bit"
+                              else normalize_frames)
+                corrections, target = normalizer(
                     registered_paths, normalized, manifest["normalization"].get("target_median_luma"))
                 if "target_median_luma" not in manifest["normalization"]:
                     manifest["normalization"]["target_median_luma"] = target
@@ -779,10 +816,11 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
             })
 
             with timed("encoding_output", timings):
-                video = segments_dir / f"frames_{first:06d}_{last:06d}_16fps.mp4"
-                temporary_video = video.with_suffix(".tmp.mp4")
+                video = segments_dir / f"frames_{first:06d}_{last:06d}_{options.fps}fps{extension}"
+                temporary_video = video.with_name(video.stem + ".tmp" + extension)
                 encode_segment(options.ffmpeg, normalized, temporary_video,
-                               encoded_before + 1, len(included), options.fps)
+                               encoded_before + 1, len(included), options.fps,
+                               options.video_format)
             emit_event(options, "stage_progress", {
                 "batch_index": batch_index,
                 "stage": "encoding",
@@ -812,6 +850,8 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
                    "source_frames": len(batch), "excluded": len(batch) - len(included),
                    "video": None if video is None else str(video),
                    "video_bytes": 0 if video is None else video.stat().st_size,
+                   "video_format": options.video_format,
+                   "bit_depth": 16 if options.video_format == "ffv1_mkv_16bit" else 8,
                    "video_sha256": None if video is None else file_sha256(video),
                    "excluded_only_segment": video is None,
                    "verified": True, "verification": verification, "reference_sprocket_x": reference_x,

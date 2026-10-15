@@ -61,7 +61,8 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
                    calibration: ProductionCalibration, ffmpeg: Path,
                    output_name: str | None = None,
                    capture_geometry_source: str = "regular8_default",
-                   sprocket_detector=None) -> dict:
+                   sprocket_detector=None,
+                   video_format: str = "h264_mp4") -> dict:
     expected_failure_policy = ("primary_p15_p24_p25_p15_p07_p22_exclude" if
                                calibration.sprocket_detector_mode == DETECTOR_MODE else
                                "legacy_interpolation")
@@ -81,6 +82,9 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
         recorded_output_name = manifest.get("output_name")
         if recorded_output_name is not None and recorded_output_name != output_name:
             raise RuntimeError("Cannot resume an output directory with a different output name")
+        recorded_format = manifest.get("video_format", "h264_mp4")
+        if recorded_format != video_format:
+            raise RuntimeError("Cannot resume an output directory with a different video format")
         recorded_mode = manifest.get("sprocket_registration", {}).get("mode", "legacy")
         if recorded_mode != calibration.sprocket_detector_mode:
             raise RuntimeError("Cannot resume an output directory with a different sprocket detector mode/version")
@@ -130,6 +134,13 @@ def load_or_create(path: Path, raw_dir: Path, numbers: list[int], fps: int, batc
         "created": utc_now(), "raw_dir": str(raw_dir), "source_policy": "read_only",
         "frame_range": [numbers[0], numbers[-1]], "frame_count": len(numbers),
         "fps": fps, "batch_frames": batch_frames, "output_name": output_name,
+        "video_format": video_format,
+        "video_encoding": ({"codec": "FFV1", "version": 3, "container": "Matroska",
+                            "pixel_format": "rgb48le", "bits_per_channel": 16,
+                            "lossless": True, "source_precision_bits_per_channel": 16}
+                           if video_format == "ffv1_mkv_16bit" else
+                           {"codec": "H.264", "container": "MP4", "pixel_format": "yuv420p",
+                            "bits_per_channel": 8, "lossless": False}),
         "raw_development_calibration": {
             "path": str(match_path), "sha256": hashlib.sha256(match_bytes).hexdigest(),
             "model": match_report.get("fit", {}).get("model"),

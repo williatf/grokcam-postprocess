@@ -127,6 +127,7 @@ class ProcessingConfig:
     batch_frames: int = 960
     raw_jobs: int = 3
     output_name: str | None = None
+    video_format: str = "h264_mp4"
     capture_geometry_path: Path | None = None
     sprocket_detector: str | None = None
 
@@ -154,6 +155,8 @@ class ProcessingConfig:
             raise ValueError("calibration_id is required")
         if self.film_format not in SUPPORTED_FILM_FORMATS:
             raise ValueError("film_format must be regular8 or super8")
+        if self.video_format not in {"h264_mp4", "ffv1_mkv_16bit"}:
+            raise ValueError("video_format must be h264_mp4 or ffv1_mkv_16bit")
         if self.capture_geometry_path is not None and self.film_format != "regular8":
             raise ValueError("capture_geometry_path is only supported for regular8")
         for name, value in (("first_frame", self.first_frame), ("last_frame", self.last_frame)):
@@ -171,6 +174,9 @@ class ProcessingConfig:
                 raise ValueError("output_name must be a filename inside output_directory")
             if "/" in self.output_name or "\\" in self.output_name:
                 raise ValueError("output_name must be a filename, not a path")
+            expected_extension = ".mkv" if self.video_format == "ffv1_mkv_16bit" else ".mp4"
+            if Path(self.output_name).suffix.lower() != expected_extension:
+                raise ValueError(f"output_name must end in {expected_extension} for {self.video_format}")
 
     def to_dict(self) -> dict[str, Any]:
         return _json_dict(self)
@@ -750,6 +756,7 @@ def process_reel(config: ProcessingConfig, event_sink: Callable[[ProcessingProgr
             "capture_geometry_source": capture_geometry_source,
             "capture_geometry_summary": source.capture_geometry_summary,
             "fps": config.fps,
+            "video_format": config.video_format,
             "batch_frames": config.batch_frames,
             "raw_jobs": config.raw_jobs,
         })
@@ -766,6 +773,7 @@ def process_reel(config: ProcessingConfig, event_sink: Callable[[ProcessingProgr
             ffmpeg=ffmpeg,
             ffprobe=ffprobe,
             output_name=config.output_name,
+            video_format=config.video_format,
             event_emitter=emitter,
             capture_geometry_source=capture_geometry_source,
         )

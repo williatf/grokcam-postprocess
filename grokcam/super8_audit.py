@@ -16,13 +16,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image
+import tifffile
 
 from .config import ProductionCalibration
-from .batch import emit_event
+from .batch import emit_event, video_extension
 from .encoding import concatenate_segments, encode_segment, file_sha256, verify_video
-from .image_processing import registered_frame
+from .image_processing import registered_frame, registered_frame_16bit
 from .models import CropGeometry
-from .normalization import normalize_frames
+from .normalization import normalize_frames, normalize_frames_16bit
 from .raw_development import DarktableMatchedDeveloper
 from .super8_registration import Super8Registration
 
@@ -211,6 +212,7 @@ def _write_processing_manifest(output_dir: Path, dngs: list[Path],
         manifest["fps"] = options.fps
         manifest["batch_frames"] = options.batch_frames
         manifest["output_name"] = options.output_name
+        manifest["video_format"] = options.video_format
     (output_dir / "processing_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -252,10 +254,17 @@ def _render_super8_records(dngs: list[Path], records: list[dict], output_dir: Pa
                     left=float(record["raw_candidate_x"] + crop.crop_x_offset),
                     top=float(record["final_registration_y"] + crop.crop_y_offset),
                     width=crop.crop_width, height=crop.crop_height)
-                movie = registered_frame(image, geometry, calibration.contrast,
-                                         vertical_flip=calibration.vertical_flip)
-                path = registered / f"frame_{encoded_before + len(registered_paths) + 1:06d}.jpg"
-                movie.save(path, quality=95, subsampling=0)
+                if options.video_format == "ffv1_mkv_16bit":
+                    movie = registered_frame_16bit(
+                        tifffile.imread(tiff), geometry, calibration.contrast,
+                        vertical_flip=calibration.vertical_flip)
+                    path = registered / f"frame_{encoded_before + len(registered_paths) + 1:06d}.tif"
+                    tifffile.imwrite(path, movie, photometric="rgb")
+                else:
+                    movie = registered_frame(image, geometry, calibration.contrast,
+                                             vertical_flip=calibration.vertical_flip)
+                    path = registered / f"frame_{encoded_before + len(registered_paths) + 1:06d}.jpg"
+                    movie.save(path, quality=95, subsampling=0)
                 registered_paths.append(path)
                 record.update({
                     "crop_left": geometry.left, "crop_top": geometry.top,
@@ -266,17 +275,22 @@ def _render_super8_records(dngs: list[Path], records: list[dict], output_dir: Pa
                     "encoded_output_frame": encoded_before + len(registered_paths),
                     "output_disposition": "included",
                 })
-        corrections, target_luma = normalize_frames(registered_paths, normalized, target_luma)
+        normalizer = (normalize_frames_16bit if options.video_format == "ffv1_mkv_16bit"
+                      else normalize_frames)
+        corrections, target_luma = normalizer(registered_paths, normalized, target_luma)
         for record, correction in zip(batch, corrections):
             record["normalization"] = correction
-        video = segments_dir / f"frames_{first:06d}_{last:06d}_{options.fps}fps.mp4"
-        temporary = video.with_suffix(".tmp.mp4")
+        extension = video_extension(options.video_format)
+        video = segments_dir / f"frames_{first:06d}_{last:06d}_{options.fps}fps{extension}"
+        temporary = video.with_name(video.stem + ".tmp" + extension)
         encode_segment(options.ffmpeg, normalized, temporary, encoded_before + 1,
-                       len(batch), options.fps)
+                       len(batch), options.fps, options.video_format)
         verification = verify_video(options.ffmpeg, options.ffprobe, temporary, len(batch))
         temporary.replace(video)
         segment_items.append({"first": first, "last": last, "frames": len(batch),
                               "source_frames": last - first + 1, "excluded": 0,
+                              "video_format": options.video_format,
+                              "bit_depth": 16 if options.video_format == "ffv1_mkv_16bit" else 8,
                               "video": str(video), "video_bytes": video.stat().st_size,
                               "video_sha256": file_sha256(video), "verified": True,
                               "verification": verification})
@@ -288,8 +302,9 @@ def _render_super8_records(dngs: list[Path], records: list[dict], output_dir: Pa
         work.rmdir()
 
     concat = output_dir / "segments.txt"
-    final = output_dir / f"Super8_REDO5_{dngs[0].stem.rsplit('_', 1)[-1]}_{dngs[-1].stem.rsplit('_', 1)[-1]}_{options.fps}fps.mp4"
-    temporary = final.with_suffix(".tmp.mp4")
+    extension = video_extension(options.video_format)
+    final = output_dir / f"Super8_REDO5_{dngs[0].stem.rsplit('_', 1)[-1]}_{dngs[-1].stem.rsplit('_', 1)[-1]}_{options.fps}fps{extension}"
+    temporary = final.with_name(final.stem + ".tmp" + extension)
     concat.write_text("".join(f"file '{Path(item['video']).as_posix()}'\n" for item in segment_items), encoding="utf-8")
     from .encoding import concatenate_segments
     concatenate_segments(options.ffmpeg, concat, [Path(item["video"]) for item in segment_items], temporary)
@@ -303,6 +318,8 @@ def _render_super8_records(dngs: list[Path], records: list[dict], output_dir: Pa
     summary = {
         "rendered_frames": encoded_before,
         "excluded_frames": len(records) - encoded_before,
+        "video_format": options.video_format,
+        "bit_depth": 16 if options.video_format == "ffv1_mkv_16bit" else 8,
         "output_video": str(final),
         "output_video_sha256": file_sha256(final),
         "output_video_verification": final_verification,
@@ -518,11 +535,18 @@ def _render_staged_batch(state: dict, output_dir: Path,
                 left=float(record["raw_candidate_x"] + crop.crop_x_offset),
                 top=float(record["final_registration_y"] + crop.crop_y_offset),
                 width=crop.crop_width, height=crop.crop_height)
-            movie = registered_frame(image, geometry, calibration.contrast,
-                                     vertical_flip=calibration.vertical_flip)
             encoded_number = encoded_before + len(registered_paths) + 1
-            path = registered / f"frame_{encoded_number:06d}.jpg"
-            movie.save(path, quality=95, subsampling=0)
+            if options.video_format == "ffv1_mkv_16bit":
+                movie = registered_frame_16bit(
+                    tifffile.imread(tiff), geometry, calibration.contrast,
+                    vertical_flip=calibration.vertical_flip)
+                path = registered / f"frame_{encoded_number:06d}.tif"
+                tifffile.imwrite(path, movie, photometric="rgb")
+            else:
+                movie = registered_frame(image, geometry, calibration.contrast,
+                                         vertical_flip=calibration.vertical_flip)
+                path = registered / f"frame_{encoded_number:06d}.jpg"
+                movie.save(path, quality=95, subsampling=0)
             registered_paths.append(path)
             record.update({"crop_left": geometry.left, "crop_top": geometry.top,
                            "crop_width": geometry.width, "crop_height": geometry.height,
@@ -545,7 +569,9 @@ def _render_staged_batch(state: dict, output_dir: Path,
                  "source_frames": len(state["records"]), "excluded": len(state["records"])},
                 target_luma, diagnostic_paths)
     normalization_started = time.perf_counter()
-    corrections, target_luma = normalize_frames(registered_paths, normalized, target_luma)
+    normalizer = (normalize_frames_16bit if options.video_format == "ffv1_mkv_16bit"
+                  else normalize_frames)
+    corrections, target_luma = normalizer(registered_paths, normalized, target_luma)
     state["timings"]["normalization_wall_seconds"] = time.perf_counter() - normalization_started
     _mark_scheduler(state, "normalization_finished", timing_origin)
     included = [record for record in state["records"]
@@ -559,11 +585,12 @@ def _render_staged_batch(state: dict, output_dir: Path,
     })
     for record, correction in zip(included, corrections):
         record["normalization"] = correction
-    video = output_dir / "segments" / f"frames_{state['first']:06d}_{state['last']:06d}_{options.fps}fps.mp4"
-    temporary = video.with_suffix(".tmp.mp4")
+    extension = video_extension(options.video_format)
+    video = output_dir / "segments" / f"frames_{state['first']:06d}_{state['last']:06d}_{options.fps}fps{extension}"
+    temporary = video.with_name(video.stem + ".tmp" + extension)
     encoding_started = time.perf_counter()
     encode_segment(options.ffmpeg, normalized, temporary, encoded_before + 1,
-                   len(registered_paths), options.fps)
+                   len(registered_paths), options.fps, options.video_format)
     verification = verify_video(options.ffmpeg, options.ffprobe, temporary, len(registered_paths))
     temporary.replace(video)
     state["timings"]["encoding_verification_wall_seconds"] = time.perf_counter() - encoding_started
@@ -578,6 +605,8 @@ def _render_staged_batch(state: dict, output_dir: Path,
     return ({"first": state["first"], "last": state["last"], "frames": len(registered_paths),
              "source_frames": len(state["records"]),
              "excluded": len(state["records"]) - len(registered_paths),
+             "video_format": options.video_format,
+             "bit_depth": 16 if options.video_format == "ffv1_mkv_16bit" else 8,
              "video": str(video), "video_bytes": video.stat().st_size,
              "video_sha256": file_sha256(video), "verified": True,
              "verification": verification}, target_luma, diagnostic_paths)
@@ -945,9 +974,10 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
 
     finalization_started = time.perf_counter()
     concat = output_dir / "segments.txt"
+    extension = video_extension(options.video_format)
     final = output_dir / (options.output_name or
-                          f"Super8_REDO5_{dngs[0].stem.rsplit('_', 1)[-1]}_{dngs[-1].stem.rsplit('_', 1)[-1]}_{options.fps}fps.mp4")
-    temporary = final.with_suffix(".tmp.mp4")
+                          f"Super8_REDO5_{dngs[0].stem.rsplit('_', 1)[-1]}_{dngs[-1].stem.rsplit('_', 1)[-1]}_{options.fps}fps{extension}")
+    temporary = final.with_name(final.stem + ".tmp" + extension)
     concatenate_segments(options.ffmpeg, concat, [Path(item["video"]) for item in segments], temporary)
     final_verification = verify_video(options.ffmpeg, options.ffprobe, temporary, encoded_before)
     temporary.replace(final)
@@ -962,6 +992,8 @@ def run_super8_batch_production(dngs: list[Path], output_dir: Path,
     summary["consecutive_exclusion_untrusted_runs"] = _consecutive_exclusion_runs(records)
     summary["render"] = {"rendered_frames": encoded_before,
                           "excluded_frames": len(records) - encoded_before,
+                          "video_format": options.video_format,
+                          "bit_depth": 16 if options.video_format == "ffv1_mkv_16bit" else 8,
                           "output_video": str(final),
                           "output_video_sha256": file_sha256(final),
                           "output_video_verification": final_verification,

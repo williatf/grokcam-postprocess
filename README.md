@@ -27,6 +27,12 @@ DNG -> matched RAW development -> 16-bit RGB TIFF
     -> verified segment -> verified joined movie + JSON manifest
 ```
 
+The default movie is H.264/MP4. Select `--video-format ffv1_mkv_16bit` to
+keep the developed 16-bit RGB precision through crop, normalization, and
+lossless FFV1 version 3 encoding in Matroska. That path uses 16-bit TIFF
+frames between stages instead of JPEGs. It produces an archival master and
+will generally create much larger files than the default viewing copy.
+
 The detector works in full developed-frame pixels. `anchor_x` and `anchor_y`
 are the midpoint of two adjacent sprocket bands. In `physical-p07-v1`, crop Y
 comes from the optical lower-top landmark, not the historical anchor. No temporal

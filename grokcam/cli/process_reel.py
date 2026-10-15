@@ -29,6 +29,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--last", type=int)
     result.add_argument("--batch-frames", type=int, default=960)
     result.add_argument("--fps", type=int, default=16)
+    result.add_argument("--video-format", choices=["h264_mp4", "ffv1_mkv_16bit"],
+                        default="h264_mp4",
+                        help="output video: compatible H.264/MP4 or 16-bit lossless FFV1/Matroska")
     result.add_argument("--jobs", type=int, default=3)
     result.add_argument("--crop-preset", choices=["loose"], default="loose")
     result.add_argument("--ffmpeg", type=Path, default=Path(ffmpeg))
@@ -68,6 +71,9 @@ def main() -> None:
             Path(args.output_name).is_absolute() or "/" in args.output_name or
             "\\" in args.output_name):
         parser().error("--output-name must be a filename, not a path")
+    expected_extension = ".mkv" if args.video_format == "ffv1_mkv_16bit" else ".mp4"
+    if args.output_name is not None and Path(args.output_name).suffix.lower() != expected_extension:
+        parser().error(f"--output-name must end in {expected_extension} for --video-format {args.video_format}")
     if args.event_stream == "jsonl":
         if not args.calibration_id:
             parser().error("--calibration-id is required with --event-stream jsonl")
@@ -92,6 +98,7 @@ def main() -> None:
             batch_frames=args.batch_frames,
             raw_jobs=args.jobs,
             output_name=args.output_name,
+            video_format=args.video_format,
             capture_geometry_path=args.capture_geometry,
             sprocket_detector=args.sprocket_detector,
         )
@@ -152,6 +159,7 @@ def main() -> None:
         ffmpeg=args.ffmpeg, ffprobe=args.ffprobe, minimum_free_gib=args.minimum_free_gib,
         plan_only=args.plan_only or args.dry_run, registration_only=args.registration_only,
         staging_dir=args.staging_dir, output_name=args.output_name,
+        video_format=args.video_format,
         capture_geometry_source=capture_geometry_source,
         registration_log=args.registration_log,
     )
