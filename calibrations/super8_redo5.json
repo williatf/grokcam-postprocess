@@ -1,6 +1,10 @@
 {
   "film_format": "super8",
   "vertical_flip": true,
+  "sprocket": {
+    "detector": "adaptive-v1",
+    "registration": "physical-p07-v1"
+  },
   "super8_registration": {
     "template_bank": "/home/todd/telecine/grokcam-postprocess/calibrations/super8_template_bank_v1.npz",
     "template_metadata": "/home/todd/telecine/grokcam-postprocess/calibrations/super8_template_bank_v1.json",

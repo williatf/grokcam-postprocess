@@ -247,7 +247,7 @@ and review the resulting audit before approving a new calibration.
 | `--calibration FILE` | none | Advanced JSON overrides for production calibration; the Super 8 REDO5 render uses `calibrations/super8_redo5.json`. |
 | `--match-report FILE` | repository v1 artifact | Explicitly override the learned match report. Avoid for normal v1 production. |
 | `--vertical-stabilization` | off | Enable second-stage physical vertical registration. Use a new output directory. |
-| `--sprocket-detector-mode MODE` | `physical-p07-v1` | Select the promoted P15-first policy or explicit `legacy` rollback behavior. Never mix modes in one output directory. |
+| `--sprocket-detector-mode MODE` | `legacy` | Select `legacy` registration or the optional `physical-p07-v1` P15-first policy. Never mix modes in one output directory. |
 | `--capture-geometry FILE` | none | Optional strictly validated Regular 8 capture-specific geometry artifact. Supplying it for Super 8 is an error. |
 | `--film-format FORMAT` | `regular8` | Select `regular8` or `super8`; Super 8 also requires a validated Super 8 crop calibration. |
 | `--registration-only` | off | For Super 8, run development and registration audit without crop/render/encode. |

@@ -213,7 +213,11 @@ class CaptureGeometryTests(unittest.TestCase):
                           return_value={"streams": [{"nb_frames": "2"}]}), \
                     patch("grokcam.batch.concatenate_segments", side_effect=fake_concat), \
                     patch("grokcam.physical_sprocket.load_capture_metadata", return_value={}):
-                _run_reel_core(options, load_calibration())
+                # This integration test exercises the existing physical P07
+                # registration path and adaptive detector mock explicitly.
+                _run_reel_core(options, replace(
+                    load_calibration(), sprocket_detector_id="adaptive-v1",
+                    sprocket_detector_mode="physical-p07-v1"))
 
             manifest = json.loads((output / "processing_manifest.json").read_text())
             segment = manifest["segments"][0]

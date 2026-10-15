@@ -295,10 +295,10 @@ def _p07_priors(image: Image.Image, capture_item) -> tuple[list[tuple[float, flo
                     "prior_count": len(priors), "physical_hole_count": len(good)}
 
 
-def run_forced_p07(image: Image.Image, capture_item=None) -> tuple[PhysicalPairResult, list, dict]:
+def run_forced_p07(image: Image.Image, capture_item=None, progress=None) -> tuple[PhysicalPairResult, list, dict]:
     """Run P07 itself; physical-pair/P06 evidence supplies priors but cannot accept or veto."""
     priors, evidence = _p07_priors(image, capture_item)
-    result = detect_pair(image, priors)
+    result = detect_pair(image, priors, progress)
     diagnostics = dict(result.diagnostics); diagnostics.update(evidence); diagnostics["stage"] = "p07"
     return PhysicalPairResult(result.accepted, result.classification, result.anchor_x,
                               result.anchor_y, diagnostics), priors, diagnostics
@@ -345,7 +345,8 @@ def refine_p22_common_y(image: Image.Image, upper_x: float, upper_y: float,
 
 def register_precisely(image: Image.Image, primary: SprocketDetection | None,
                        capture_item, timings: dict, counters: dict,
-                       geometry: Regular8CaptureGeometry | None = None
+                       geometry: Regular8CaptureGeometry | None = None,
+                       progress=None,
                        ) -> RegistrationResult:
     """Apply primary/P15 -> frozen P24/P25/P15 -> frozen P07/P22."""
     counters["frames"] += 1; counters["p15_attempts"] += 1
@@ -359,6 +360,9 @@ def register_precisely(image: Image.Image, primary: SprocketDetection | None,
         counters["primary_p15_attempts"] += 1
         p15 = measure_p15_lower_top(image, primary.cx, primary.cy, geometry)
     elapsed=time.perf_counter()-started;timings["primary_p15_measurement"]+=elapsed;timings["p15_measurement"]+=elapsed
+    if progress is not None:
+        progress("p15_complete", {"elapsed_seconds": elapsed, "valid": p15["valid"],
+                                  "reason": p15.get("reason")})
     if p15["valid"]:
         counters["p15_successes"] += 1; counters["primary_p15_successes"] += 1
         optical_y = float(p15["y"])
@@ -375,12 +379,21 @@ def register_precisely(image: Image.Image, primary: SprocketDetection | None,
                                    "p22_attempted": False})
 
     guide, p24 = evaluate_p24_guide(image, capture_item, timings, counters, geometry)
+    if progress is not None:
+        progress("p24_evaluated", {"guide_found": guide is not None,
+                                    "disposition": p24.get("disposition"),
+                                    "diagnostics": p24})
     if guide is not None:
         counters["p24_guided_p15_attempts"] += 1; started=time.perf_counter()
         p24_p15=measure_p15_lower_top(image, *guide, geometry)
         elapsed=time.perf_counter()-started;timings["p24_guided_p15_measurement"]+=elapsed;timings["p15_measurement"]+=elapsed
         p24["p15"] = p24_p15; p24["guide_anchor_x"],p24["guide_anchor_y"]=guide
         p24["guide_expected_lower_top_y"]=p24_p15.get("expected_y")
+        if progress is not None:
+            progress("p24_p15_complete", {"elapsed_seconds": elapsed,
+                                           "valid": p24_p15["valid"],
+                                           "reason": p24_p15.get("reason"),
+                                           "disposition": p24.get("disposition")})
         if p24_p15["valid"]:
             counters["p15_successes"]+=1;counters["p24_guided_p15_successes"]+=1
             optical_y=float(p24_p15["y"]);anchor_x=float(guide[0])
@@ -395,8 +408,20 @@ def register_precisely(image: Image.Image, primary: SprocketDetection | None,
         counters["p24_guided_p15_failures"]+=1;p24["disposition"]="p24_admitted_p15_rejected"
 
     counters["p07_attempts"] += 1; started = time.perf_counter()
-    p07, priors, p07_diagnostics = run_forced_p07(image, capture_item)
-    timings["p07_fallback_detection"] += time.perf_counter() - started
+    if progress is not None:
+        progress("p07_started", {"reason": "p15_and_p24_did_not_produce_valid_registration"})
+    p07, priors, p07_diagnostics = run_forced_p07(
+        image, capture_item,
+        progress=(None if progress is None else
+                  lambda details: progress("p07_search_progress", details)),
+    )
+    p07_elapsed = time.perf_counter() - started
+    timings["p07_fallback_detection"] += p07_elapsed
+    if progress is not None:
+        progress("p07_complete", {"elapsed_seconds": p07_elapsed,
+                                   "accepted": p07.accepted,
+                                   "classification": p07.classification,
+                                   "diagnostics": p07_diagnostics})
     diagnostics = {"primary_detected": primary is not None,
                    "primary_roi_anchor": None if primary is None else primary.to_dict(),
                    "p15": p15, "primary_p15":p15,"p24":p24,"p07_attempted": True,
@@ -410,9 +435,15 @@ def register_precisely(image: Image.Image, primary: SprocketDetection | None,
 
     counters["p07_successes"] += 1; counters["p22_invocations"] += 1
     started = time.perf_counter()
+    if progress is not None:
+        progress("p22_started", {})
     upper_x, upper_y = p07_diagnostics["upper_center"]
     shift, p22 = refine_p22_common_y(image, upper_x, upper_y, priors)
-    timings["p22_refinement"] += time.perf_counter() - started
+    p22_elapsed = time.perf_counter() - started
+    timings["p22_refinement"] += p22_elapsed
+    if progress is not None:
+        progress("p22_complete", {"elapsed_seconds": p22_elapsed, "shift": shift,
+                                   "diagnostics": p22})
     refined_lower_y = float(p07_diagnostics["lower_center"][1]) + shift
     model_lower_top_y = refined_lower_y - 136.0
     optical_y = model_lower_top_y + MODEL_TO_OPTICAL_OFFSET_Y

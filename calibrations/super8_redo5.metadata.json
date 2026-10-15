@@ -5,7 +5,7 @@
   "film_formats": ["super8"],
   "config": "super8_redo5.json",
   "artifact": "super8_redo5.json",
-  "artifact_sha256": "dee69c341cd323c772e2128a84f9a0e97a91854eb2449fcb8146823cf791870a",
+  "artifact_sha256": "a3a8dbd3325ad6ffd392bed79a997ebbcfa1318d13fd97e2a1ace67c589d0ec8",
   "requires": [
     "darktable_match_v1.json",
     "super8_template_bank_v1.json",

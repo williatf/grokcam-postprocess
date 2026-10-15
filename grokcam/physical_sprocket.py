@@ -247,7 +247,7 @@ def _add_grid(points,cx0,cx1,cy0,cy1,step,cfg):
         for x in np.arange(max(xmin,cx0),min(xmax,cx1)+.1,step): points.add((round(float(x),3),round(float(y),3)))
 
 
-def fit_pair(image: Image.Image | np.ndarray, priors=(), metrics=None):
+def fit_pair(image: Image.Image | np.ndarray, priors=(), metrics=None, progress=None):
     """Return the exact cached P07 candidate result for one developed image."""
     rgb=np.asarray(image.convert("RGB") if isinstance(image,Image.Image) else image)
     cfg=FROZEN_CONFIG; H,W=rgb.shape[:2]; w,h=cfg["hole_width"],cfg["hole_height"]
@@ -270,13 +270,19 @@ def fit_pair(image: Image.Image | np.ndarray, priors=(), metrics=None):
     points=set(); _add_grid(points,xmin,xmax,ymin,ymax,cfg["coarse_step"],cfg)
     for px,py in normalized: _add_grid(points,px-cfg["prior_radius"],px+cfg["prior_radius"],py-cfg["prior_radius"],py+cfg["prior_radius"],cfg["prior_step"],cfg)
     coarse=[]
-    for ux,uy in points:
+    for index,(ux,uy) in enumerate(points, start=1):
         c=candidate(ux,uy); d=min((math.hypot(ux-px,uy-py) for px,py in normalized),default=0);c["prior_distance"]=d;c["score"]=c["raw_score"]-cfg["weak_prior_weight"]*min(d,200)/200;coarse.append(c)
+        if progress is not None and (index % 100 == 0 or index == len(points)):
+            progress({"phase":"coarse","completed":index,"total":len(points),
+                      "candidate_cache_misses":counts["candidate_cache_misses"]})
     coarse.sort(key=lambda z:z["score"],reverse=True); refine=set()
     for c in coarse[:cfg["refine_hypotheses"]]: _add_grid(refine,c["upper_x"]-cfg["refine_radius"],c["upper_x"]+cfg["refine_radius"],c["upper_y"]-cfg["refine_radius"],c["upper_y"]+cfg["refine_radius"],cfg["refine_step"],cfg)
     fine=[]
-    for ux,uy in refine:
+    for index,(ux,uy) in enumerate(refine, start=1):
         c=candidate(ux,uy);d=min((math.hypot(ux-px,uy-py) for px,py in normalized),default=0);c["prior_distance"]=d;c["score"]=c["raw_score"]-cfg["weak_prior_weight"]*min(d,200)/200;fine.append(c)
+        if progress is not None and (index % 100 == 0 or index == len(refine)):
+            progress({"phase":"fine","completed":index,"total":len(refine),
+                      "candidate_cache_misses":counts["candidate_cache_misses"]})
     candidates=sorted(fine or coarse,key=lambda z:z["score"],reverse=True);best0=candidates[0];best=candidate(best0["upper_x"],best0["upper_y"],True)
     best["prior_distance"]=best0["prior_distance"];best["score"]=best["raw_score"]-cfg["weak_prior_weight"]*min(best["prior_distance"],200)/200
     competitors=[c for c in candidates[1:] if math.hypot(c["upper_x"]-best["upper_x"],c["upper_y"]-best["upper_y"])>=cfg["competitor_separation_px"]]
@@ -288,8 +294,10 @@ def fit_pair(image: Image.Image | np.ndarray, priors=(), metrics=None):
     return best
 
 
-def detect_pair(image: Image.Image, priors=()) -> PhysicalPairResult:
-    cache_metrics={};best=fit_pair(image,priors,cache_metrics)
+def detect_pair(image: Image.Image, priors=(), progress=None) -> PhysicalPairResult:
+    cache_metrics={}
+    best=(fit_pair(image,priors,cache_metrics) if progress is None else
+          fit_pair(image,priors,cache_metrics,progress))
     if best["safe"]: classification="joint_pair_recovery"
     elif best["margin"]<FROZEN_CONFIG["competitor_margin_min"]: classification="ambiguous_competing_pair_positions"
     elif best["contradicted"]>FROZEN_CONFIG["maximum_total_contradicted"] or best["strongest_contradiction"]>FROZEN_CONFIG["maximum_contradiction_strength"]: classification="contradictory_pair_evidence"

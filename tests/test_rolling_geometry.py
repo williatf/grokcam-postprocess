@@ -54,9 +54,9 @@ class RollingGeometryDetectorTests(unittest.TestCase):
         self.assertEqual(source.band_edges(bright, band, calibration),
                          band_edges(bright, band, calibration))
 
-    def test_detector_is_selectable_but_adaptive_remains_default(self):
+    def test_rolling_geometry_is_default_and_adaptive_remains_selectable(self):
         calibration = load_calibration()
-        self.assertEqual(calibration.sprocket_detector_id, "adaptive-v1")
+        self.assertEqual(calibration.sprocket_detector_id, "rolling-geometry-v1")
         detector = create_detector("rolling-geometry-v1", calibration.detector)
         self.assertEqual(detector.name, "rolling-geometry-v1")
         self.assertTrue(detector.stateful)
@@ -104,7 +104,9 @@ class RollingGeometryDetectorTests(unittest.TestCase):
                            rolling, Path("ffmpeg"))
             with self.assertRaisesRegex(RuntimeError, "different sprocket detector"):
                 load_or_create(manifest_path, Path("/archive/raw"), [1], 16, 1,
-                               load_calibration(), Path("ffmpeg"))
+                               replace(load_calibration(),
+                                       sprocket_detector_id="adaptive-v1"),
+                               Path("ffmpeg"))
 
 
 if __name__ == "__main__":

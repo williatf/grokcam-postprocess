@@ -48,7 +48,7 @@ class DetectorArchitectureTests(unittest.TestCase):
     def test_only_existing_production_detector_is_registered_by_default(self):
         self.assertEqual(registered_detectors(),
                          ("adaptive-v1", "rolling-geometry-v1"))
-        self.assertEqual(load_calibration().sprocket_detector_id, "adaptive-v1")
+        self.assertEqual(load_calibration().sprocket_detector_id, "rolling-geometry-v1")
         with self.assertRaisesRegex(ValueError, "unknown sprocket detector"):
             create_detector("not-registered", load_calibration().detector)
 
@@ -68,7 +68,7 @@ class DetectorArchitectureTests(unittest.TestCase):
 
             path.write_text('{"sprocket_detector_mode": "legacy"}')
             old = load_calibration(path)
-            self.assertEqual(old.sprocket_detector_id, "adaptive-v1")
+            self.assertEqual(old.sprocket_detector_id, "rolling-geometry-v1")
             self.assertEqual(old.sprocket_detector_mode, "legacy")
 
             path.write_text('{"sprocket": {"registration": "legacy"}, '
@@ -165,16 +165,20 @@ class DetectorArchitectureTests(unittest.TestCase):
         finally:
             unregister_detector("mock-stateful-test")
 
-    def test_legacy_manifest_without_detector_identity_resumes_with_default(self):
+    def test_legacy_manifest_without_detector_identity_resumes_with_adaptive_override(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "processing_manifest.json"
+            # Historical manifests without detector metadata were produced by
+            # adaptive-v1. Resume them only when that detector is selected.
+            calibration = replace(load_calibration(),
+                                  sprocket_detector_id="adaptive-v1")
             load_or_create(path, Path("/archive/raw"), [1], 16, 1,
-                           load_calibration(), Path("ffmpeg"))
+                           calibration, Path("ffmpeg"))
             manifest = json.loads(path.read_text())
             manifest.pop("sprocket_detection")
             path.write_text(json.dumps(manifest))
             resumed = load_or_create(path, Path("/archive/raw"), [1], 16, 1,
-                                     load_calibration(), Path("ffmpeg"))
+                                     calibration, Path("ffmpeg"))
             self.assertEqual(resumed["sprocket_detection"]["name"], "adaptive-v1")
 
 

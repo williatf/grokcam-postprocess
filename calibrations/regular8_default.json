@@ -1,1 +1,6 @@
-{}
+{
+  "sprocket": {
+    "detector": "rolling-geometry-v1",
+    "registration": "legacy"
+  }
+}

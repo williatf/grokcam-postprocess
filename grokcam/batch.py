@@ -57,12 +57,24 @@ class RunOptions:
     output_name: str | None = None
     event_emitter: EventEmitter | None = None
     capture_geometry_source: str = "regular8_default"
+    registration_log: Path | None = None
 
 
 def emit_event(options: RunOptions, event: str, payload: dict) -> None:
     """Send a typed event when the public API requested progress events."""
     if options.event_emitter is not None:
         options.event_emitter.emit(event, payload)
+
+
+def write_registration_log(options: RunOptions, event: str, payload: dict) -> None:
+    """Append a flushed JSONL trace when detailed registration logging is enabled."""
+    if options.registration_log is None:
+        return
+    record = {"timestamp": utc_now(), "event": event, **payload}
+    options.registration_log.parent.mkdir(parents=True, exist_ok=True)
+    with options.registration_log.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        stream.flush()
 
 
 def frame_number(path: Path) -> int:
@@ -532,9 +544,22 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
             detector_diagnostics = []
             for dng in batch:
                 with Image.open(tiffs / f"{dng.stem}.tif") as image:
+                    detector_started = time.perf_counter()
                     outcome = primary_detector.detect(image)
+                    detector_seconds = time.perf_counter() - detector_started
                     measured.append(outcome.detection)
-                    detector_diagnostics.append(outcome.diagnostics.to_dict())
+                    diagnostics = outcome.diagnostics.to_dict()
+                    detector_diagnostics.append(diagnostics)
+                    detection = outcome.detection
+                    write_registration_log(options, "primary_detection", {
+                        "batch_index": batch_index,
+                        "frame": frame_number(dng),
+                        "detector": calibration.sprocket_detector_id,
+                        "elapsed_seconds": detector_seconds,
+                        "detected": detection is not None,
+                        "anchor": None if detection is None else detection.to_dict(),
+                        "diagnostics": diagnostics,
+                    })
         registration_primary = measured
         if calibration.capture_geometry is not None:
             # The new geometry was validated with the established batch gate.
@@ -552,10 +577,38 @@ def _run_reel_core(options: RunOptions, calibration: ProductionCalibration) -> N
             precise_results = []
             for index, dng in enumerate(batch):
                 with Image.open(tiffs / f"{dng.stem}.tif") as image:
+                    primary = registration_primary[index]
+                    write_registration_log(options, "registration_start", {
+                        "batch_index": batch_index,
+                        "frame": frame_number(dng),
+                        "primary_detected": primary is not None,
+                        "primary_accepted": None if primary is None else primary.accepted,
+                        "primary_anchor": None if primary is None else primary.to_dict(),
+                    })
+
+                    def log_stage(stage, details):
+                        write_registration_log(options, "registration_stage", {
+                            "batch_index": batch_index,
+                            "frame": frame_number(dng),
+                            "stage": stage,
+                            **details,
+                        })
+
+                    registration_started = time.perf_counter()
                     result = register_precisely(
-                        image, registration_primary[index], capture_metadata.get(frame_number(dng)),
+                        image, primary, capture_metadata.get(frame_number(dng)),
                         timings, registration_counts, calibration.capture_geometry,
+                        progress=log_stage if options.registration_log is not None else None,
                     )
+                    write_registration_log(options, "registration_complete", {
+                        "batch_index": batch_index,
+                        "frame": frame_number(dng),
+                        "elapsed_seconds": time.perf_counter() - registration_started,
+                        "source": result.source,
+                        "crop": None if result.crop is None else result.crop.to_dict(),
+                        "p07_attempted": result.diagnostics.get("p07_attempted", False),
+                        "p07_accepted": result.diagnostics.get("p07_accepted"),
+                    })
                 precise_results.append(result)
                 physical_details[index] = result.diagnostics
                 provenance = {

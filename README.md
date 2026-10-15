@@ -65,28 +65,30 @@ Useful options are `--first`, `--last`, `--batch-frames`, `--jobs`, `--fps`,
 `--minimum-free-gib`, `--calibration`, `--match-report`, and
 `--vertical-stabilization`. Production staging defaults to the local
 `/mnt/grokcam-scratch` filesystem; use `--staging-dir PATH` to override it.
-`--sprocket-detector-mode` selects the production
-default `physical-p07-v1` or rollback-only `legacy`; either must use an output
-directory whose manifest has the same recorded policy. Residual vertical
-registration is available only in legacy mode.
+`--sprocket-detector-mode` selects registration. Regular 8 defaults to
+`legacy`; `physical-p07-v1` remains available as an explicit option. Either
+mode requires an output directory whose manifest has the same recorded
+policy. Residual vertical registration is available only in legacy mode.
 
 Primary detection is selected independently with `--sprocket-detector` or the
-`sprocket.detector` calibration key. `adaptive-v1` is the current and default
-detector. See [sprocket detector architecture](docs/sprocket-detectors.md) for
-the detector interface, diagnostics, and stateful resume checkpoints.
+`sprocket.detector` calibration key. Regular 8 defaults to the stateful
+`rolling-geometry-v1` detector. See [sprocket detector architecture](docs/sprocket-detectors.md)
+for detector selection, diagnostics, and stateful resume checkpoints.
 
-Enable it for a new output directory with:
+Enable physical P07 registration explicitly for a new output directory with:
 
 ```bash
 /home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
-  RAW_DIR OUTPUT_DIR --sprocket-detector-mode legacy --vertical-stabilization
+  RAW_DIR OUTPUT_DIR --sprocket-detector-mode physical-p07-v1
 ```
 
-The promoted policy is now the default; it can also be named explicitly with:
+The default rolling detector and legacy registration can also be named
+explicitly with:
 
 ```bash
 /home/todd/telecine/.venv/bin/python -m grokcam.cli.process_reel \
-  RAW_DIR NEW_OUTPUT_DIR --sprocket-detector-mode physical-p07-v1
+  RAW_DIR NEW_OUTPUT_DIR --sprocket-detector rolling-geometry-v1 \
+  --sprocket-detector-mode legacy
 ```
 
 ## Physical P07 cascade

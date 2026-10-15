@@ -46,8 +46,8 @@ class ProductionTests(unittest.TestCase):
     def test_vertical_stabilization_is_disabled_by_default(self):
         self.assertFalse(load_calibration().vertical_stabilization.enabled)
 
-    def test_promoted_precision_registration_is_default(self):
-        self.assertEqual(load_calibration().sprocket_detector_mode, DETECTOR_MODE)
+    def test_legacy_registration_is_default(self):
+        self.assertEqual(load_calibration().sprocket_detector_mode, "legacy")
 
     def test_vertical_calibration_override_is_explicit(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -6,8 +6,8 @@ The existing registration setting and CLI option remain supported:
 ```json
 {
   "sprocket": {
-    "detector": "adaptive-v1",
-    "registration": "physical-p07-v1"
+    "detector": "rolling-geometry-v1",
+    "registration": "legacy"
   }
 }
 ```
@@ -16,14 +16,16 @@ For compatibility, old calibration files with `sprocket_detector_mode` still
 load, and `--sprocket-detector-mode` still selects registration. The new
 `--sprocket-detector` option selects the primary detector. The programmatic
 `ProcessingConfig.sprocket_detector` field provides the same selection at the
-processing API boundary. Both default to the existing behavior: detector
-`adaptive-v1`, registration `physical-p07-v1`.
+processing API boundary. The Regular 8 production default is detector
+`rolling-geometry-v1` with `legacy` registration. `adaptive-v1` and
+`physical-p07-v1` remain selectable. The Super 8 REDO5 calibration retains its
+prior explicit settings.
 
 ## Available detectors
 
 ### `adaptive-v1`
 
-This remains the default detector. It wraps the existing
+This is the stateless alternative detector. It wraps the existing
 `grokcam.sprocket_detection.detect` implementation without changing its
 calculation or coordinates.
 
@@ -46,14 +48,14 @@ calculations. Their source and the original trial script are preserved under
 reference inputs and reproduction procedure. The experimental thresholds and
 geometry gates are fixed; detector options are not accepted.
 
-Select the detector in calibration while leaving registration selection
-independent:
+Select the rolling detector with the default legacy registration, or choose a
+different registration policy independently:
 
 ```json
 {
   "sprocket": {
     "detector": "rolling-geometry-v1",
-    "registration": "physical-p07-v1"
+    "registration": "legacy"
   }
 }
 ```
@@ -65,12 +67,24 @@ grokcam-process-reel --sprocket-detector rolling-geometry-v1 \
   --raw-dir /path/to/capture --output-dir /path/to/output
 ```
 
+These are the Regular 8 defaults and can be overridden with
+`--sprocket-detector` or `--sprocket-detector-mode`. Registration remains a
+separate choice; selecting `physical-p07-v1` explicitly retains the P15/P24/P25/P07/P22 cascade.
+
 Diagnostics include fast or profile-fallback method, accepted/recovered/
 fallback-only/unresolved status, fallback attempt and recovery flags, geometry
 gate rejection reason, rolling pitch/height/width/aspect/center, dynamic row
 minimum, bootstrap progress, threshold measurements, candidate counts, and the
 selected pair geometry. Diagnostics are observational and do not feed back
 into detection.
+
+For a production run that needs live registration tracing, pass
+`--registration-log /path/to/registration.jsonl`. The flushed JSONL log records
+each primary detector result and registration frame start, P15 outcome, P24
+decision, P07 start/completion, P22 timing, and final registration result. A
+long P07 search emits coarse/fine candidate progress every 100 candidates, so
+the last record identifies the frame and search phase if the run is
+interrupted. Choose a new log path for each run; records append to the file.
 
 The detector is stateful. Its checkpoints include the rolling accepted-pair
 history and the first 12 bootstrap measurements. Verified segment checkpoints
@@ -105,9 +119,13 @@ record stores the detector's JSON state and identity. Before a later pending
 batch, the pipeline restores the checkpoint from the nearest earlier verified
 segment. If detector name, version, effective configuration, or statefulness
 does not match, resume stops with an error. A stateful detector also refuses
-to resume past a verified segment that lacks a checkpoint. The built-in
-`adaptive-v1` is stateless, so historical manifests without detector metadata
-remain resumable and are upgraded with its identity.
+to resume past a verified segment that lacks a checkpoint. Historical
+manifests without detector metadata can be resumed with an explicit
+`--sprocket-detector adaptive-v1`; the loader records that identity during
+resume. The stateful default cannot safely resume a manifest that lacks
+detector identity and state history. Existing output directories also require
+the detector and registration mode recorded in their manifest, so use
+matching CLI overrides to resume them.
 
 Each frame record stores detector diagnostics separately from the geometric
 detection and registration diagnostics.

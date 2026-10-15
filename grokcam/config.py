@@ -265,9 +265,9 @@ class ProductionCalibration:
     # Primary detector and registration policy are independent choices. The
     # legacy attribute below remains the Python attribute and legacy JSON
     # input alias for registration selection.
-    sprocket_detector_id: str = "adaptive-v1"
+    sprocket_detector_id: str = "rolling-geometry-v1"
     sprocket_detector_options: dict = field(default_factory=dict)
-    sprocket_detector_mode: str = "physical-p07-v1"
+    sprocket_detector_mode: str = "legacy"
     contrast: float = 1.04
     picture_aperture_x: tuple[float, float] = (0.15, 0.92)
     picture_aperture_y: tuple[float, float] = (0.12, 0.88)

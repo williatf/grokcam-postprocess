@@ -45,13 +45,15 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--vertical-stabilization", action="store_true",
                         help="enable second-stage physical vertical registration")
     result.add_argument("--sprocket-detector-mode", choices=["legacy", "physical-p07-v1"],
-                        help="registration algorithm (default from calibration)")
+                        help="registration algorithm (default from calibration; currently legacy)")
     result.add_argument("--sprocket-detector", choices=registered_detectors(),
-                        help="primary detector ID (default from calibration; currently adaptive-v1)")
+                        help="primary detector ID (default from calibration; currently rolling-geometry-v1)")
     result.add_argument("--film-format", choices=["regular8", "super8"],
                         help="film-format strategy (default from calibration)")
     result.add_argument("--registration-only", action="store_true",
                         help="run registration and audit manifests without crop/render/encode")
+    result.add_argument("--registration-log", type=Path,
+                        help="append flushed per-frame detector and registration-stage details as JSONL")
     result.add_argument("--output-name", help="final movie filename (machine/API mode or normal CLI)")
     result.add_argument("--calibration-id", help="discovered calibration ID for machine/API mode")
     result.add_argument("--event-stream", choices=["jsonl"],
@@ -151,6 +153,7 @@ def main() -> None:
         plan_only=args.plan_only or args.dry_run, registration_only=args.registration_only,
         staging_dir=args.staging_dir, output_name=args.output_name,
         capture_geometry_source=capture_geometry_source,
+        registration_log=args.registration_log,
     )
     ProductionPipeline(calibration).process_reel(options)
 
